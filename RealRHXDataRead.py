@@ -10,6 +10,8 @@ from threading import Thread, Event
 from queue import Queue
 import sys
 
+from TestRead import ReadIntanDataThread
+
 class FileMonitorHandler(FileSystemEventHandler):
     # 文件监控类
     def __init__(self, reader):
@@ -161,21 +163,9 @@ class RealTimeDataReader:
                     # num_samples = available_samples - self.plotted_samples
 
                     # 创建一个字典用于存储每个通道的数据
-                    channel_data_dict = {'t': None, 'd': None}  # 可以根据实际通道标识进行扩展
-
-                    # 从time.dat读取时间戳数据
-                    if self.t_fid.seekable():
-                        self.t_fid.seek(self.stored_samples * 4)  # 定位到上次读取的位置
-                    t_data = np.fromfile(self.t_fid, dtype=np.int32, count=num_samples)
-                    channel_data_dict['t'] = t_data / self.sample_rate
-
-                    # 从每个amp-*.dat文件读取数据
-                    for i, fid in enumerate(self.d_fids):
-                        channel_key = f'd_{i + 1}'  # 使用通道标识作为字典键
-                        if fid.seekable():
-                            fid.seek(self.stored_samples * 2)  # 定位到上次读取的位置
-                        d_data = np.fromfile(fid, dtype=np.int16, count=num_samples)
-                        channel_data_dict[channel_key] = d_data * self.d_scale
+                    channel_data_dict = {'t': None, 'd': None}
+                    channel_data_dict['t'] = self.read_timestamp(num_samples)
+                    self.read_data(channel_data_dict, num_samples)
 
                     # 将整个字典放入队列
                     self.data_queue.put(('data', channel_data_dict))
@@ -417,11 +407,17 @@ class RealTimeDataReader:
         - 此方法假设时间戳文件中的数据格式为32位整数（np.int32）。
         """
 
-        data = np.fromfile(self.t_fid, dtype=np.int32, count=num_samples)
-        return data / self.sample_rate
+        # 从time.dat读取时间戳数据
+        if self.t_fid.seekable():
+            self.t_fid.seek(self.stored_samples * 4)  # 定位到上次读取的位置
 
+        print(f"Current position in timestamp file (before read): {self.t_fid.tell()}")
+        t_data = np.fromfile(self.t_fid, dtype=np.int32, count=num_samples)
+        print(f"Current position in timestamp file (after read): {self.t_fid.tell()}")
 
-    def read_data(self, num_samples):
+        return t_data / self.sample_rate
+
+    def read_data(self, channel_data_dict, num_samples):
         """
         从所有打开的数据文件中读取指定数量的样本，并应用放大器缩放。
 
@@ -443,11 +439,15 @@ class RealTimeDataReader:
         - 缩放因子0.195是根据放大器的规格预设的，样例是这个，跟随使用了这个
         """
 
-        data = []
-        for fid in self.d_fids:
-            channel_data = np.fromfile(fid, dtype=np.int16, count=num_samples)
-            data.append(channel_data)
-        return np.array(data) * 0.195  # Assuming amplifier scaling
+        # 从每个amp-*.dat文件读取数据
+        for i, fid in enumerate(self.d_fids):
+            channel_key = f'd_{i + 1}'  # 使用通道标识作为字典键
+            if fid.seekable():
+                fid.seek(self.stored_samples * 2)  # 定位到上次读取的
+            print(f"Current position in data file {i + 1} (before read): {fid.tell()}")
+            d_data = np.fromfile(fid, dtype=np.int16, count=num_samples)
+            channel_data_dict[channel_key] = d_data * self.d_scale
+            print(f"Current position in data file {i + 1} (after read): {fid.tell()}")
 
     # plot 相关的均是测试用
     def start_plotting_task(self):
@@ -555,9 +555,11 @@ class RealTimeDataReader:
 if __name__ == "__main__":
 
     directory_to_monitor1 = "E:/TCP/Data/1"  # 要监控的目录
-    directory_to_monitor2 = "E:/TCP/Data/2"  # 要监控的目录
+    # directory_to_monitor2 = "E:/TCP/Data/2"  # 要监控的目录
     reader = RealTimeDataReader()
     reader.set_monitoring_directory(directory_to_monitor1)
+
+    ReadIntanDataThread(reader)
 
     # 测试目录切换用
     # time.sleep(10)
