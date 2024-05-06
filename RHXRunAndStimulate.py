@@ -43,6 +43,30 @@ class InvalidControllerType(Exception):
     ControllerStimRecord (this script only works with Stim systems).
     """
 
+def get_SampleRateHertz(scommand, command_buffer_size = 1024):
+    """
+    获取采样率（赫兹）。
+
+    参数:
+    - scommand: socket 对象，用于与外部设备进行通信。
+    - command_buffer_size: 整数，接收缓冲区大小，默认为 1024。
+
+    返回值:
+    - 整数，采样率（赫兹）。如果转换失败，返回 None。
+    """
+
+    scommand.sendall(b'get SampleRateHertz')
+    command_return = str(scommand.recv(command_buffer_size), "utf-8")
+
+    # 提取采样率
+    try:
+        sample_rate = int(command_return.split()[-1])
+    except (IndexError, ValueError) as e:
+        print(f"Error extracting sample rate: {e}")
+        sample_rate = None
+
+    return sample_rate
+
 
 def verify_controller_type(scommand, command_buffer_size):
     """
@@ -267,7 +291,9 @@ def RunAndStimulateDemo():
     # Test1
     # TestDemo1(scommand)
     # Test2
-    TestDemo2(scommand)
+    # TestDemo2(scommand)
+    # Test3
+    TestDemo3(scommand)
     # -----------------------------------------------------------------------------------------
     # Close TCP socket
     disconnect_from_server(scommand)
@@ -293,6 +319,9 @@ def TestDemo1(scommand):
     scommand.sendall(b'set runmode run;')
 
     TriggerStimulation(scommand,'keypressf1')
+
+def TestDemo3(scommand):
+    print(get_SampleRateHertz(scommand, 1024))
 
 if __name__ == '__main__':
     # Declare buffer size for reading from TCP command socket

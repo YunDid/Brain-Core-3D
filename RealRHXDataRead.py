@@ -6,11 +6,13 @@ import os
 import time
 import matplotlib.pyplot as plt
 import struct  # 用于处理二进制数据
+
 from threading import Thread, Event
 from queue import Queue
 import sys
 
-from TestRead import ReadIntanDataThread
+from threading import Thread, Event
+from queue import Queue, Empty
 
 class FileMonitorHandler(FileSystemEventHandler):
     # 文件监控类
@@ -54,6 +56,20 @@ class RealTimeDataReader:
         # 放大器数据数据缩放
         self.d_scale = 0.195
 
+        # 临时存储数据缓冲区
+        self.samples_per_100ms = None  # 在 `data_loading_task` 中进行初始化
+        self.temp_data_t = None
+        self.temp_data_d = None
+
+        # 缓冲池大小监控线程相关
+        self.max_queue_size = 20   # 10000s的数据最大
+        self.safe_queue_size = 10  # 8000s时进行数据清空 13min的数据
+        self.monitor_interval = 1  # 5分钟间隔
+
+        # 若启用定时器，不使用多线程
+        self.monitor_thread_queue = None
+        self.monitor_running_queue = False
+
         # ----------------------绘图测试相关-----------------------
         self.plotting_thread = None
         self.spacing = 1000 # 绘图测试用 通道垂直间距
@@ -73,6 +89,22 @@ class RealTimeDataReader:
         self.start_data_loading_thread()
         # 监控线程的启动由 set_monitoring_directory 启动
         # self.start_monitoring()
+
+        # 启动队列监控线程，若启用定时器，不使用多线程
+        self.start_monitoring_Queue()
+
+    def start_monitoring_Queue(self):
+        """启动监控线程"""
+        self.monitor_running_queue = True
+        self.monitor_thread = Thread(target=self.queue_monitoring_task)
+        self.monitor_thread.start()
+
+    def stop_monitoring_Queue(self):
+        """停止监控线程"""
+        self.monitor_running_queue = False
+        if self.monitor_thread:
+            self.monitor_thread.join()
+            self.monitor_thread = None
 
     def start_monitoring(self):
         """初始化并启动文件监视器。"""
@@ -117,6 +149,40 @@ class RealTimeDataReader:
             # 将会创建一个新的线程实例。
             self.data_loading_thread = None
 
+    def queue_monitoring_task(self):
+        """
+        队列监控任务的主循环。
+
+        此方法作为一个后台线程运行，定期检查数据队列的大小，并根据最大阈值执行清理或警告操作。
+
+        参数:
+        无
+
+        返回值:
+        无
+        """
+        while self.monitor_running_queue:
+            try:
+                queue_size = self.data_queue.qsize()
+                print(f"Current queue size: {queue_size}")
+
+                if queue_size > self.max_queue_size:
+                    items_removed = 0
+                    print("Queue exceeds max size, discarding old data")
+
+                    while self.data_queue.qsize() > self.safe_queue_size:
+                        try:
+                            self.data_queue.get_nowait()  # 弹出旧数据
+                            items_removed += 1
+                        except Empty:
+                            break
+
+                    print(f"Removed {items_removed} items from the queue to reach the safe size.")
+
+                time.sleep(self.monitor_interval)
+            except Exception as e:
+                print(f"Error in queue monitoring task: {e}")
+                time.sleep(0.1)
     def data_loading_task(self):
         """
         数据加载任务的主循环。
@@ -125,12 +191,14 @@ class RealTimeDataReader:
         并从这些文件中读取数据。读取的数据会被缩放并以字典的形式放入队列中，
         供其他部分的代码进一步处理。
 
+        注意该接口读取逻辑为最大化读取，重组切割后存储，使得每个元素为 100 ms 的数据块.
+
         方法执行流程：
         1. 检查是否所有必需的文件描述符都已就绪。如果没有，等待0.1秒后再次检查。
         2. 计算当前可用的样本数量，基于时间戳文件和数据文件的大小。
         3. 如果可用的样本数量大于设定的缓冲大小，则从文件中读取这些样本。
         4. 从时间戳文件中读取时间戳数据，并从每个数据文件中读取样本数据。
-        5. 将读取的数据缩放后存入字典，然后将字典放入队列中。
+        5. 将读取的数据缩放重组后存入字典，然后将字典放入队列中。
         6. 更新已存储的样本数量，并打印当前队列的状态信息。
 
         参数:
@@ -143,41 +211,61 @@ class RealTimeDataReader:
         - 在数据文件格式或采样率发生变化时，需要相应地调整读取和缩放逻辑。
         """
 
+        # self.samples_per_100ms = int(self.sample_rate * 0.1)  # 100ms对应的样本数
+        self.samples_per_100ms = int(25000 * 0.1)  # 100ms对应的样本数
+
+        self.temp_data_t = np.empty(0, dtype=np.float32)
+        self.temp_data_d = np.empty((64, 0), dtype=np.float32)
+
+        # self.temp_data_d = np.empty((len(self.d_fids), 0), dtype=np.float32)
+
         while self.loading_running:
             try:
-                # 首先检查所有必需的文件描述符是否就绪
                 if not self.ready_to_load:
-                    time.sleep(0.1)  # 如果必需的文件尚未就绪，则等待
+                    time.sleep(0.1)
                     continue
 
-                # 计算可用样本数   
                 available_samples_t = os.path.getsize(self.timestamp_filename) // 4
                 available_samples_d = min(os.path.getsize(f) // 2 for f in self.filenames) if self.filenames else 0
                 available_samples = min(available_samples_t, available_samples_d)
-
                 num_samples = available_samples - self.stored_samples
 
-                # 直接按照可用样本数进行数据读取
-                if num_samples > self.min_samples_per_read:
-                    # 计算本次应读取的样本数
-                    # num_samples = available_samples - self.plotted_samples
+                if num_samples >= self.min_samples_per_read:
+                    # 读取新的数据
+                    new_data_t = self._read_timestamp(num_samples)
+                    new_data_d = self._read_data(num_samples)
 
-                    # 创建一个字典用于存储每个通道的数据
-                    channel_data_dict = {'t': None, 'd': None}
-                    channel_data_dict['t'] = self.read_timestamp(num_samples)
-                    self.read_data(channel_data_dict, num_samples)
+                    # 将新数据添加到临时缓冲区
+                    self.temp_data_t = np.concatenate((self.temp_data_t, new_data_t))
+                    self.temp_data_d = np.concatenate((self.temp_data_d, new_data_d), axis=1)
 
-                    # 将整个字典放入队列
-                    self.data_queue.put(('data', channel_data_dict))
+                    # 计算可以生成多少个完整的100ms块
+                    complete_blocks = self.temp_data_t.size // self.samples_per_100ms
+
+                    if complete_blocks > 0:
+                        end_idx = complete_blocks * self.samples_per_100ms
+
+                        for start in range(0, end_idx, self.samples_per_100ms):
+                            block_data_t = self.temp_data_t[start:start + self.samples_per_100ms]
+                            block_data_d = self.temp_data_d[:, start:start + self.samples_per_100ms]
+                            channel_data_dict = {'t': block_data_t, 'd': {}}
+
+                            for i, fid in enumerate(self.d_fids):
+                                channel_key = f'd_{i + 1}'
+                                channel_data_dict['d'][channel_key] = block_data_d[i, :]
+
+                            self.data_queue.put(('data', channel_data_dict))
+
+                        # 更新剩余数据
+                        self.temp_data_t = self.temp_data_t[end_idx:]
+                        self.temp_data_d = self.temp_data_d[:, end_idx:]
+
                     self.stored_samples += num_samples
-                    print(f"current_storeing_samples : {num_samples}")
-                    print(f"stored_samples : {self.stored_samples}")
-
-                    size_of_dict = sys.getsizeof(channel_data_dict)
-                    # print(f"num_samples : {num_samples}")
+                    print(f"current_storing_samples: {num_samples}")
+                    print(f"stored_samples: {self.stored_samples}")
                     print(f"Size of the queue: {self.data_queue.qsize()}\n")
                 else:
-                    time.sleep(0.1)  # 如果没有可用的样本，稍等一会儿再检查
+                    time.sleep(0.1)
             except Exception as e:
                 print(f"Error loading data: {e}")
                 time.sleep(0.1)
@@ -387,7 +475,7 @@ class RealTimeDataReader:
                 fids.append(fid)
         return fids
 
-    def read_timestamp(self, num_samples):
+    def _read_timestamp(self, num_samples):
         """
         从时间戳文件中读取指定数量的样本，并按照采样率调整时间戳。
 
@@ -417,7 +505,30 @@ class RealTimeDataReader:
 
         return t_data / self.sample_rate
 
-    def read_data(self, channel_data_dict, num_samples):
+    def _read_data(self, num_samples):
+        '''
+        从所有打开的数据文件中读取指定数量的样本，并应用放大器缩放。
+        此方法遍历所有已打开的数据文件描述符（self.d_fids 中的每个项），从每个文件中读取
+        指定数量的样本。读取的样本是16位整数格式，代表放大器采集到的原始数据。为了将这些
+        原始数据转换为实际的物理量度（例如，电压），每个样本值将乘以一个缩放因子（Intan 提
+        供的样例为 0.195）。
+        参数:
+        - num_samples: 整数，指定要从每个文件中读取的样本数量。
+        返回值:
+        - 一个NumPy数组，其中包含从每个数据文件中读取的样本值，已按照放大器缩放调整。
+        数组的形状为(通道数, num_samples)，每一行对应一个通道的数据。
+        '''
+        data = []
+        for i, fid in enumerate(self.d_fids):
+            if fid.seekable():
+                fid.seek(self.stored_samples * 2)
+            print(f"Current position in data file {i + 1} (before read): {fid.tell()}")
+            d_data = np.fromfile(fid, dtype=np.int16, count=num_samples)
+            data.append(d_data * self.d_scale)
+            print(f"Current position in data file {i + 1} (after read): {fid.tell()}")
+        return np.array(data)
+
+    def _read_data_trash(self, channel_data_dict, num_samples):
         """
         从所有打开的数据文件中读取指定数量的样本，并应用放大器缩放。
 
@@ -448,6 +559,49 @@ class RealTimeDataReader:
             d_data = np.fromfile(fid, dtype=np.int16, count=num_samples)
             channel_data_dict[channel_key] = d_data * self.d_scale
             print(f"Current position in data file {i + 1} (after read): {fid.tell()}")
+
+    def read_data(self, timespan_ms):
+        """
+        根据指定的时间跨度（毫秒）从数据队列中读取拼接后的二维数组和时间戳。
+
+        参数:
+        - timespan_ms: 整数，表示时间跨度，以毫秒为单位，应为100ms的整数倍。
+
+        返回值:
+        - NumPy二维数组，形状为 (通道数, 样本数)，其中样本数为 timespan_ms 转换后的样本数。
+        - NumPy数组，长度与样本数一致，表示时间戳。
+        """
+        # samples_needed = int(self.sample_rate * (timespan_ms / 1000))  # 总样本数
+
+        samples_needed = int(25000 * (timespan_ms / 1000))  # 总样本数
+
+        blocks_needed = samples_needed // self.samples_per_100ms  # 需要的100ms块数
+
+        collected_t = np.empty(0, dtype=np.float32)
+        collected_d = np.empty((len(self.d_fids), 0), dtype=np.float32)
+
+        blocks_collected = 0
+
+        while blocks_collected < blocks_needed:
+            try:
+                data_type, channel_data_dict = self.data_queue.get(timeout=1.0)
+
+                if data_type == 'data':
+                    # 提取并拼接时间戳和数据
+                    collected_t = np.concatenate((collected_t, channel_data_dict['t']))
+                    new_data_d = np.array([channel_data_dict['d'][f'd_{i + 1}'] for i in range(len(self.d_fids))])
+                    collected_d = np.concatenate((collected_d, new_data_d), axis=1)
+                    blocks_collected += 1
+            except Exception as e:
+                print(f"Error while reading data: {e}")
+                break
+
+        # 检查数据是否足够
+        if collected_t.size >= samples_needed and collected_d.shape[1] >= samples_needed:
+            return collected_d[:, :samples_needed], collected_t[:samples_needed]
+        else:
+            print("Insufficient data available")
+            return None, None
 
     # plot 相关的均是测试用
     def start_plotting_task(self):
@@ -558,8 +712,6 @@ if __name__ == "__main__":
     # directory_to_monitor2 = "E:/TCP/Data/2"  # 要监控的目录
     reader = RealTimeDataReader()
     reader.set_monitoring_directory(directory_to_monitor1)
-
-    ReadIntanDataThread(reader)
 
     # 测试目录切换用
     # time.sleep(10)
