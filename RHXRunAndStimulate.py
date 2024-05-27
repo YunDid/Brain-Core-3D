@@ -206,7 +206,7 @@ def TriggerStimulation(scommand, key):
     刺激施加后，调用方负责在合适的时刻将运行模式切换回'stop'或其他状态。
 
     :param scommand: 已连接到TCP服务器的套接字对象。用于发送TCP命令。
-    :param key: 触发刺激的键值，例如 'keypressf1 - keypressf8'，用于指定触发特定刺激的键。
+    :param key: 触发刺激的键值，例如 'f1 - f8'，用于指定触发特定刺激的键。
     """
 
     com_trigger = f'execute manualstimtriggerpulse {key};'
@@ -439,11 +439,11 @@ def TestDemo4(scommand):
 
     time.sleep(1)
 
-    TriggerStimulation(scommand, 'KeyPressF1')
+    TriggerStimulation(scommand, 'f1')
 
     time.sleep(3)
 
-    TriggerStimulation(scommand, 'KeyPressF2')
+    TriggerStimulation(scommand, 'f2')
 
 
 
