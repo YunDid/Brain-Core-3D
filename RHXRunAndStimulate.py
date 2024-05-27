@@ -112,92 +112,91 @@ def ensure_controller_stopped(scommand, command_buffer_size):
         print('Controller is already stopped.')
 
 
-def configureTrainStimulation(scommand, channel, source, amplitude, duration, pulseTrain, numberOfstimpulses, stimenabled = False):
+def _configureStimulation(scommand, channel, source, amplitude, duration, stimenabled, pulseTrain="SinglePulse", numberOfstimpulses=2):
 
     """
-    生成配置单个通道高频刺激设置的命令字符串，例如设置为 256 个刺激脉冲的序列。
+    生成配置通道刺激设置的命令字符串。
+    此接口不对外部开放。
 
     :param scommand: 已连接到TCP服务器的套接字对象。此函数生成命令字符串，但不发送它；
                      调用者负责使用此套接字发送命令。
     :param channel: 要配置的通道名称，例如 'A-010'。
     :param source: 刺激的来源，例如 'keypressf1'。
-    :param amplitude: 刺激第一阶段的幅度，单位为微安。
-    :param duration: 刺激第一阶段的持续时间，单位为微秒。
-    :param pulseTrain: “SinglePulse” - 默认 or “PulseTrain”
-    :param train_num: 刺激脉冲数 0-256。
+    :param amplitude: 刺激电流幅度列表，分别代表第一个脉冲幅度与第二个脉冲幅度，单位为微安。 注意非负。
+    :param duration: 时间列表，分别代表第一个刺激脉宽时间，第二个刺激脉宽时间，和刺激后放大器稳定时间，单位为微秒。
+    :param pulseTrain: “SinglePulse” - 默认 or “PulseTrain”。
+    :param numberOfstimpulses: 刺激脉冲数 0-256，仅在 pulseTrain 为 “PulseTrain” 时有效。
     :param stimenabled: 一个布尔值，指示是否启用通道的刺激（True）或禁用（False）。
 
     :return: 包含配置刺激通道所需的所有命令的字符串。命令用分号连接，并准备通过TCP发送。
 
     注意：此函数仅生成配置字符串。发送此字符串通过`scommand`套接字是调用者的责任。
          确保通过执行返回的命令上传刺激参数以使其生效。返回字符串中命令的顺序对于正确配置非常重要。
-         参数可以增加，因为还有其他刺激参数可以调整，对应增加接口中指令设置即可.
-         最后指令返回，主调函数负责发送指令，注意设置顺序.
+         参数可以增加，因为还有其他刺激参数可以调整，对应增加接口中指令设置即可。
+         最后指令返回，主调函数负责发送指令，注意设置顺序。
     """
 
-
-    # 必须有的，设置通道刺激为可触发态.
+    # 必须有的，设置通道刺激为可触发态
     com_stimenabled = f'set {channel}.stimenabled {stimenabled};'
 
-
-    # 其他指令该处插入即可.
+    # 其他指令该处插入即可
     com_source = f'set {channel}.source {source};'
 
-    com_firstphaseamplitudemicroamps = f'set {channel}.firstphaseamplitudemicroamps {amplitude};'
+    # 刺激电流幅值
+    com_firstphaseamplitudemicroamps = f'set {channel}.firstphaseamplitudemicroamps {amplitude[0]};'
+    com_secondphaseamplitudemicroamps = f'set {channel}.secondphaseamplitudemicroamps {amplitude[1]};'
 
-    com_firstphasedurationmicroseconds = f'set {channel}.firstphasedurationmicroseconds {duration};'
+    # 刺激脉宽
+    com_firstphasedurationmicroseconds = f'set {channel}.firstphasedurationmicroseconds {duration[0]};'
+    com_secondphasedurationmicroseconds = f'set {channel}.secondphasedurationmicroseconds {duration[1]};'
 
-    com_PulseOrTrain = f'set {channel}.PulseOrTrain {pulseTrain};'
+    # 刺激后放大器稳定时间
+    com_poststimampsettlemicroseconds = f'set {channel}.poststimampsettlemicroseconds {duration[2]};'
 
-    com_numberOfstimpulses = f'set {channel}.NumberOfStimPulses {numberOfstimpulses};'
+    # 单点与高频刺激类别
+    com_pulseortrain = f'set {channel}.PulseOrTrain {pulseTrain};'
 
-    # 必须上传后才能生效.
-    com_uploadstimparameters = f'execute uploadstimparameters {channel};'
+    # 检查是否为高频刺激
+    if pulseTrain == "PulseTrain":
 
-    com_config = com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_firstphasedurationmicroseconds + com_PulseOrTrain + com_numberOfstimpulses + com_uploadstimparameters;
+        com_numberOfstimpulses = f'set {channel}.NumberOfStimPulses {numberOfstimpulses};'
+        com_uploadstimparameters = f'execute uploadstimparameters {channel};'
+        com_config = (com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_secondphaseamplitudemicroamps + com_firstphasedurationmicroseconds + com_secondphasedurationmicroseconds + com_poststimampsettlemicroseconds
+                      + com_pulseortrain + com_numberOfstimpulses + com_uploadstimparameters)
+    else:
+
+    # 单点刺激直接上传
+        com_uploadstimparameters = f'execute uploadstimparameters {channel};'
+        com_config = (
+                com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_secondphaseamplitudemicroamps + com_firstphasedurationmicroseconds + com_secondphasedurationmicroseconds + com_poststimampsettlemicroseconds
+                + com_pulseortrain + com_uploadstimparameters)
 
     return com_config
 
-
-def configureSingleStimulation(scommand, channel, source, amplitude, duration, stimenabled = False):
-
+def configureStimulation(scommand, channels, amplitude, duration, trigger):
     """
-    生成配置单个通道刺激设置的命令字符串。
+    为多个通道生成配置刺激设置的命令字符串。
 
     :param scommand: 已连接到TCP服务器的套接字对象。此函数生成命令字符串，但不发送它；
                      调用者负责使用此套接字发送命令。
-    :param channel: 要配置的通道名称，例如 'A-010'。
-    :param source: 刺激的来源，例如 'keypressf1'。
-    :param amplitude: 刺激第一阶段的幅度，单位为微安。
-    :param duration: 刺激第一阶段的持续时间，单位为微秒。
-    :param stimenabled: 一个布尔值，指示是否启用通道的刺激（True）或禁用（False）。
+    :param channels: 一个包含要配置的通道名称的列表，例如 ['A-010', 'A-011']。
+    :param amplitude: 刺激电流幅度列表，分别代表第一个脉冲幅度与第二个脉冲幅度，单位为微安。 注意非负。
+    :param duration: 时间列表，分别代表第一个刺激脉宽时间，第二个刺激脉宽时间，和刺激后放大器稳定时间，单位为微秒。
+    :param trigger: 字符串，表示触发器 'keypressf1 - keypressf8'。
 
-    :return: 包含配置刺激通道所需的所有命令的字符串。命令用分号连接，并准备通过TCP发送。
+    :return: 包含配置多个通道刺激设置所需的所有命令的字符串。命令用分号连接，并准备通过TCP发送。
 
     注意：此函数仅生成配置字符串。发送此字符串通过`scommand`套接字是调用者的责任。
          确保通过执行返回的命令上传刺激参数以使其生效。返回字符串中命令的顺序对于正确配置非常重要。
-         参数可以增加，因为还有其他刺激参数可以调整，对应增加接口中指令设置即可.
-         最后指令返回，主调函数负责发送指令，注意设置顺序.
     """
 
+    com_configs = []
 
-    # 必须有的，设置通道刺激为可触发态.
-    com_stimenabled = f'set {channel}.stimenabled {stimenabled};'
+    for channel in channels:
+        com_config = _configureStimulation(scommand, channel, trigger, amplitude, duration, stimenabled=True, pulseTrain="SinglePulse", numberOfstimpulses=2)
+        com_configs.append(com_config)
 
-    # 其他指令该处插入即可.
-    com_source = f'set {channel}.source {source};'
-
-    com_firstphaseamplitudemicroamps = f'set {channel}.firstphaseamplitudemicroamps {amplitude};'
-
-    com_firstphasedurationmicroseconds = f'set {channel}.firstphasedurationmicroseconds {duration};'
-
-    # 必须上传后才能生效.
-    com_uploadstimparameters = f'execute uploadstimparameters {channel};'
-
-    com_config = com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_firstphasedurationmicroseconds + com_uploadstimparameters;
-
-    return com_config
-
+    return ';'.join(com_configs)
 
 def TriggerStimulation(scommand, key):
     """
@@ -207,12 +206,11 @@ def TriggerStimulation(scommand, key):
     刺激施加后，调用方负责在合适的时刻将运行模式切换回'stop'或其他状态。
 
     :param scommand: 已连接到TCP服务器的套接字对象。用于发送TCP命令。
-    :param key: 触发刺激的键值，例如 'F1'，用于指定触发特定刺激的键。
+    :param key: 触发刺激的键值，例如 'keypressf1 - keypressf8'，用于指定触发特定刺激的键。
     """
 
-    com_trigger = f'execute manualstimtriggerpulse {key}'
+    com_trigger = f'execute manualstimtriggerpulse {key};'
     scommand.sendall(com_trigger.encode())
-    time.sleep(0.1)  # 给TCP命令执行留出短暂时间
 
 
 def setFilePath(scommand, baseFileName, path):
@@ -278,6 +276,228 @@ def stopRecord(scommand):
     scommand.sendall(b'set runmode stop')
     time.sleep(0.1)  # Give some time for the command to be processed
 
+
+#--------------------------------------以下接口不必在意--------------------------------------
+
+def __configureTrainStimulation(scommand, channel, source, amplitude, duration, pulseTrain, numberOfstimpulses, stimenabled = False):
+
+    """
+    生成配置单个通道高频刺激设置的命令字符串，例如设置为 256 个刺激脉冲的序列。
+    此接口不对外部开放。
+
+    :param scommand: 已连接到TCP服务器的套接字对象。此函数生成命令字符串，但不发送它；
+                     调用者负责使用此套接字发送命令。
+    :param channel: 要配置的通道名称，例如 'A-010'。
+    :param source: 刺激的来源，例如 'keypressf1'。
+    :param amplitude: 刺激第一阶段的幅度，单位为微安。
+    :param duration: 刺激第一阶段的持续时间，单位为微秒。
+    :param pulseTrain: “SinglePulse” - 默认 or “PulseTrain”
+    :param train_num: 刺激脉冲数 0-256。
+    :param stimenabled: 一个布尔值，指示是否启用通道的刺激（True）或禁用（False）。
+
+    :return: 包含配置刺激通道所需的所有命令的字符串。命令用分号连接，并准备通过TCP发送。
+
+    注意：此函数仅生成配置字符串。发送此字符串通过`scommand`套接字是调用者的责任。
+         确保通过执行返回的命令上传刺激参数以使其生效。返回字符串中命令的顺序对于正确配置非常重要。
+         参数可以增加，因为还有其他刺激参数可以调整，对应增加接口中指令设置即可.
+         最后指令返回，主调函数负责发送指令，注意设置顺序.
+    """
+
+
+    # 必须有的，设置通道刺激为可触发态.
+    com_stimenabled = f'set {channel}.stimenabled {stimenabled};'
+
+
+    # 其他指令该处插入即可.
+    com_source = f'set {channel}.source {source};'
+
+    com_firstphaseamplitudemicroamps = f'set {channel}.firstphaseamplitudemicroamps {amplitude};'
+
+    com_firstphasedurationmicroseconds = f'set {channel}.firstphasedurationmicroseconds {duration};'
+
+    com_PulseOrTrain = f'set {channel}.PulseOrTrain {pulseTrain};'
+
+    com_numberOfstimpulses = f'set {channel}.NumberOfStimPulses {numberOfstimpulses};'
+
+    # 必须上传后才能生效.
+    com_uploadstimparameters = f'execute uploadstimparameters {channel};'
+
+    com_config = com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_firstphasedurationmicroseconds + com_PulseOrTrain + com_numberOfstimpulses + com_uploadstimparameters;
+
+    return com_config
+
+
+def __configureSingleStimulation(scommand, channel, source, amplitude, duration, stimenabled = False):
+
+    """
+    生成配置单个通道刺激设置的命令字符串。
+    此接口不对外部开放。
+
+    :param scommand: 已连接到TCP服务器的套接字对象。此函数生成命令字符串，但不发送它；
+                     调用者负责使用此套接字发送命令。
+    :param channel: 要配置的通道名称，例如 'A-010'。
+    :param source: 刺激的来源，例如 'keypressf1'。
+    :param amplitude: 刺激第一阶段的幅度，单位为微安。
+    :param duration: 刺激第一阶段的持续时间，单位为微秒。
+    :param stimenabled: 一个布尔值，指示是否启用通道的刺激（True）或禁用（False）。
+
+    :return: 包含配置刺激通道所需的所有命令的字符串。命令用分号连接，并准备通过TCP发送。
+
+    注意：此函数仅生成配置字符串。发送此字符串通过`scommand`套接字是调用者的责任。
+         确保通过执行返回的命令上传刺激参数以使其生效。返回字符串中命令的顺序对于正确配置非常重要。
+         参数可以增加，因为还有其他刺激参数可以调整，对应增加接口中指令设置即可.
+         最后指令返回，主调函数负责发送指令，注意设置顺序.
+    """
+
+
+    # 必须有的，设置通道刺激为可触发态.
+    com_stimenabled = f'set {channel}.stimenabled {stimenabled};'
+
+    # 其他指令该处插入即可.
+    com_source = f'set {channel}.source {source};'
+
+    com_firstphaseamplitudemicroamps = f'set {channel}.firstphaseamplitudemicroamps {amplitude};'
+
+    com_firstphasedurationmicroseconds = f'set {channel}.firstphasedurationmicroseconds {duration};'
+
+    # 必须上传后才能生效.
+    com_uploadstimparameters = f'execute uploadstimparameters {channel};'
+
+    com_config = com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_firstphasedurationmicroseconds + com_uploadstimparameters;
+
+    return com_config
+
+def __configureSingleStimulation2(scommand, channel, source, amplitude, duration, stimenabled = False):
+
+    """
+    生成配置单个通道刺激设置的命令字符串。
+    此接口不对外部开放。
+
+    :param scommand: 已连接到TCP服务器的套接字对象。此函数生成命令字符串，但不发送它；
+                     调用者负责使用此套接字发送命令。
+    :param channel: 要配置的通道名称，例如 'A-010'。
+    :param source: 刺激的来源，例如 'keypressf1'。
+    :param amplitude: 刺激第一阶段的幅度，单位为微安。
+    :param duration: 刺激第一阶段的持续时间，单位为微秒。
+    :param stimenabled: 一个布尔值，指示是否启用通道的刺激（True）或禁用（False）。
+
+    :return: 包含配置刺激通道所需的所有命令的字符串。命令用分号连接，并准备通过TCP发送。
+
+    注意：此函数仅生成配置字符串。发送此字符串通过`scommand`套接字是调用者的责任。
+         确保通过执行返回的命令上传刺激参数以使其生效。返回字符串中命令的顺序对于正确配置非常重要。
+         参数可以增加，因为还有其他刺激参数可以调整，对应增加接口中指令设置即可.
+         最后指令返回，主调函数负责发送指令，注意设置顺序.
+    """
+
+
+    # 必须有的，设置通道刺激为可触发态.
+    com_stimenabled = f'set {channel}.stimenabled {stimenabled};'
+
+    # 其他指令该处插入即可.
+    com_source = f'set {channel}.source {source};'
+
+    com_firstphaseamplitudemicroamps = f'set {channel}.firstphaseamplitudemicroamps {amplitude};'
+
+    com_firstphasedurationmicroseconds = f'set {channel}.firstphasedurationmicroseconds {duration};'
+
+    # 必须上传后才能生效.
+    com_uploadstimparameters = f'execute uploadstimparameters {channel};'
+
+    # com_config = com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_firstphasedurationmicroseconds + com_uploadstimparameters;
+
+    com_config = com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_firstphasedurationmicroseconds;
+
+
+    return com_config
+
+
+# -----------------------------------------------Test-----------------------------------------------
+
+
+def TestDemo2(scommand):
+    baseFileName = f"FileName"
+    path = f"E:/TCP/Data"
+
+    setFilePath(scommand, baseFileName, path)
+    setSaveFileFormat(scommand,2,4,True,True,5)
+
+    startRecord(scommand)
+    time.sleep(2)
+    stopRecord(scommand)
+
+def TestDemo4(scommand):
+    channels = ['A-000','A-001','A-002','A-003']
+    channels2 = ['A-004', 'A-005', 'A-006', 'A-007']
+
+    command = configureStimulation(scommand,channels, [100,100], [200,200,10], "KeyPressF1")
+    scommand.sendall(command.encode())
+
+    command += configureStimulation(scommand, channels2, [50,50], [200, 200, 10], "KeyPressF2")
+    scommand.sendall(command.encode())
+
+    scommand.sendall(b'set runmode run;')
+
+    time.sleep(1)
+
+    TriggerStimulation(scommand, 'KeyPressF1')
+
+    time.sleep(3)
+
+    TriggerStimulation(scommand, 'KeyPressF2')
+
+
+
+def TestDemo1(scommand):
+
+    channels1 = ['A-000']
+    channels = ['A-001']
+
+    command = __configureSingleStimulation(scommand, channels1[0], 'keypressf1', 10, 500, True)
+    scommand.sendall(command.encode())
+
+    scommand.sendall(b'set runmode run;')
+
+    # time.sleep(2)
+    #
+    # command = __configureSingleStimulation(scommand, channels[0], 'keypressf2', 9, 9, True)
+    # scommand.sendall(command.encode())
+    #
+    # command = __configureSingleStimulation(scommand, channels[0], 'keypressf3', 8, 8, True)
+    # scommand.sendall(command.encode())
+    #
+    # command = __configureSingleStimulation(scommand, channels[0], 'keypressf4', 7, 7, True)
+    # scommand.sendall(command.encode())
+    #
+    # command = __configureSingleStimulation(scommand, channels[0], 'keypressf5', 6, 6, True)
+    # scommand.sendall(command.encode())
+    #
+    # command = __configureSingleStimulation(scommand, channels[0], 'keypressf6', 5, 5, True)
+    # scommand.sendall(command.encode())
+
+    # TriggerStimulation(scommand,'keypressf1')
+
+def TestDemo6(scommand):
+
+    channels1 = ['A-000']
+    channels2 = ['A-001']
+
+    command = __configureSingleStimulation(scommand, channels1[0], 'KeyPressF1', 3, 2, True)
+    scommand.sendall(command.encode())
+
+    scommand.sendall(b'set runmode run;')
+
+    time.sleep(5)
+
+    command = __configureSingleStimulation(scommand, channels1[0], 'KeyPressF2', 300, 200, True)
+    scommand.sendall(command.encode())
+
+    # command = __configureSingleStimulation(scommand, channels2[0], 'keypressf2', 3, 100, True)
+    # scommand.sendall(command.encode())
+
+def TestDemo3(scommand):
+    print(get_SampleRateHertz(scommand, 1024))
+
+
 def RunAndStimulateDemo():
 
     # Connect to TCP command server - default home IP address at port 5000
@@ -293,35 +513,14 @@ def RunAndStimulateDemo():
     # Test2
     # TestDemo2(scommand)
     # Test3
-    TestDemo3(scommand)
+    # TestDemo3(scommand)
+    # Test4
+    TestDemo4(scommand)
+    # Test6
+    # TestDemo6(scommand)
     # -----------------------------------------------------------------------------------------
     # Close TCP socket
     disconnect_from_server(scommand)
-
-def TestDemo2(scommand):
-    baseFileName = f"FileName"
-    path = f"E:/TCP/Data"
-
-    setFilePath(scommand, baseFileName, path)
-    setSaveFileFormat(scommand,2,4,True,True,5)
-
-    startRecord(scommand)
-    time.sleep(2)
-    stopRecord(scommand)
-
-def TestDemo1(scommand):
-
-    channels = ['A-000']
-
-    command = configureTrainStimulation(scommand, channels[0], 'keypressf1', 10, 500, 'PulseTrain', 256, True)
-    scommand.sendall(command.encode())
-
-    scommand.sendall(b'set runmode run;')
-
-    TriggerStimulation(scommand,'keypressf1')
-
-def TestDemo3(scommand):
-    print(get_SampleRateHertz(scommand, 1024))
 
 if __name__ == '__main__':
     # Declare buffer size for reading from TCP command socket
