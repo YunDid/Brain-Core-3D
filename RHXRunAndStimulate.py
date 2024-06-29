@@ -429,10 +429,10 @@ def TestDemo4(scommand):
     channels = ['A-000','A-001','A-002','A-003']
     channels2 = ['A-004', 'A-005', 'A-006', 'A-007']
 
-    command = configureStimulation(scommand,channels, [100,100], [200,200,10], "KeyPressF1")
+    command = configureStimulation(scommand,channels, [2550,2550], [5000,5000,500000], "KeyPressF1")
     scommand.sendall(command.encode())
 
-    command += configureStimulation(scommand, channels2, [50,50], [200, 200, 10], "KeyPressF2")
+    command += configureStimulation(scommand, channels2, [2550,2550], [5000, 5000, 500000], "KeyPressF2")
     scommand.sendall(command.encode())
 
     scommand.sendall(b'set runmode run;')
@@ -484,7 +484,7 @@ def TestDemo6(scommand):
     command = __configureSingleStimulation(scommand, channels1[0], 'KeyPressF1', 3, 2, True)
     scommand.sendall(command.encode())
 
-    scommand.sendall(b'set runmode run;')
+    # scommand.sendall(b'set runmode run;')
 
     time.sleep(5)
 

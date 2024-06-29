@@ -18,13 +18,16 @@ class FileMonitorHandler(FileSystemEventHandler):
     # 文件监控类
     def __init__(self, reader):
         self.reader = reader
+        self.latestfile = ""
 
     def on_created(self, event):
         if event.is_directory:
             # 新目录创建，打印路径，但不在这里处理
             print(f"New directory created: {event.src_path}")
         if any(event.src_path.endswith(ext) for ext in ['.dat', '.rhs']):
+            # if self.latestfile != event.src_path:
             self.reader.handle_new_file(event.src_path)
+            # self.latestfile = event.src_path
 
 class RealTimeDataReader:
     # 数据实时读取类
@@ -48,6 +51,10 @@ class RealTimeDataReader:
         self.d_fids = []
         # 时间戳数据文件描述符
         self.t_fid = None
+        # 刺激数据文件描述符
+        self.stim_fids = []
+        # 刺激数据转化所需步长，目前不明确值为多少
+        self.stim_step_size = 10
         # ----------------------缓冲池设置相关-----------------------
         self.data_queue = Queue()
         self.min_samples_per_read = 1000
@@ -73,6 +80,10 @@ class RealTimeDataReader:
         # ----------------------绘图测试相关-----------------------
         self.plotting_thread = None
         self.spacing = 1000 # 绘图测试用 通道垂直间距
+        # 初始化一秒数据窗口
+        self.one_second_data_t = np.empty(0, dtype=np.float32)
+        self.one_second_data_d = np.empty((64, 0), dtype=np.float32)  # 假设有64个数据通道
+        self.one_second_data_s = np.empty((6, 0), dtype=np.float32)   # 假设有6个刺激通道
 
         # ----------------------多线程相关-----------------------
         # 监控线程
@@ -91,7 +102,7 @@ class RealTimeDataReader:
         # self.start_monitoring()
 
         # 启动队列监控线程，若启用定时器，不使用多线程
-        self.start_monitoring_Queue()
+        # self.start_monitoring_Queue()
 
     def start_monitoring_Queue(self):
         """启动监控线程"""
@@ -183,6 +194,7 @@ class RealTimeDataReader:
             except Exception as e:
                 print(f"Error in queue monitoring task: {e}")
                 time.sleep(0.1)
+
     def data_loading_task(self):
         """
         数据加载任务的主循环。
@@ -215,9 +227,10 @@ class RealTimeDataReader:
         self.samples_per_100ms = int(25000 * 0.1)  # 100ms对应的样本数
 
         self.temp_data_t = np.empty(0, dtype=np.float32)
+        # 后期准备改，该维度应该与文件描述符列表匹配，在监控到数据产生后进行数据加载
         self.temp_data_d = np.empty((64, 0), dtype=np.float32)
-
-        # self.temp_data_d = np.empty((len(self.d_fids), 0), dtype=np.float32)
+        # 这里的6需要与监控到数据后的维度一致
+        self.temp_data_s = np.empty((4, 0), dtype=np.float32)  # 初始化存储刺激数据的临时缓冲区
 
         while self.loading_running:
             try:
@@ -234,10 +247,12 @@ class RealTimeDataReader:
                     # 读取新的数据
                     new_data_t = self._read_timestamp(num_samples)
                     new_data_d = self._read_data(num_samples)
+                    new_data_s = self._read_stimulation_data(num_samples)["Stimdata"]
 
                     # 将新数据添加到临时缓冲区
                     self.temp_data_t = np.concatenate((self.temp_data_t, new_data_t))
                     self.temp_data_d = np.concatenate((self.temp_data_d, new_data_d), axis=1)
+                    self.temp_data_s = np.concatenate((self.temp_data_s, new_data_s), axis=1)
 
                     # 计算可以生成多少个完整的100ms块
                     complete_blocks = self.temp_data_t.size // self.samples_per_100ms
@@ -248,17 +263,23 @@ class RealTimeDataReader:
                         for start in range(0, end_idx, self.samples_per_100ms):
                             block_data_t = self.temp_data_t[start:start + self.samples_per_100ms]
                             block_data_d = self.temp_data_d[:, start:start + self.samples_per_100ms]
-                            channel_data_dict = {'t': block_data_t, 'd': {}}
+                            block_data_s = self.temp_data_s[:, start:start + self.samples_per_100ms]  # 获取刺激数据块
+                            channel_data_dict = {'t': block_data_t, 'd': {}, 's': {}}  # 添加刺激数据到字典
 
                             for i, fid in enumerate(self.d_fids):
                                 channel_key = f'd_{i + 1}'
                                 channel_data_dict['d'][channel_key] = block_data_d[i, :]
+
+                            for j, s_fid in enumerate(self.stim_fids):
+                                stim_key = f's_{j + 1}'
+                                channel_data_dict['s'][stim_key] = block_data_s[j, :]
 
                             self.data_queue.put(('data', channel_data_dict))
 
                         # 更新剩余数据
                         self.temp_data_t = self.temp_data_t[end_idx:]
                         self.temp_data_d = self.temp_data_d[:, end_idx:]
+                        self.temp_data_s = self.temp_data_s[:, end_idx:]  # 更新剩余刺激数据
 
                     self.stored_samples += num_samples
                     print(f"current_storing_samples: {num_samples}")
@@ -303,6 +324,10 @@ class RealTimeDataReader:
                 for fid in self.d_fids:
                     fid.close()
                 self.d_fids = []
+            if self.stim_fids:
+                for fid in self.stim_fids:
+                    fid.close()
+                self.stim_fids = []
             # 缓冲池清空
             # 注意存在丢失问题，所以何时清空缓冲池中数据后续需要考虑.
             with self.data_queue.mutex:
@@ -322,7 +347,7 @@ class RealTimeDataReader:
         注意：该方法假定文件按照特定的扩展名（.dat, .rhs）进行区分。
 
         参数:
-        - filename: 新创建或修改的文件的完整路径。
+        - filepath: 新创建或修改的文件的完整路径。
 
         返回值:
         无
@@ -331,6 +356,9 @@ class RealTimeDataReader:
         # 检查是否为新目录并作处理.
         self.handle_new_subdirectory(filename)
 
+        # 获取文件的基础名称（不带路径部分）
+        basename = os.path.basename(filename)
+
         # 检测并处理新文件
         if filename not in self.filenames:
             if 'time.dat' in filename:
@@ -338,13 +366,17 @@ class RealTimeDataReader:
                 self.t_fid = self.open_file(filename)
             elif 'info.rhs' in filename:
                 self.read_sample_rate_from_info_file(filename)
-            elif filename.endswith('.dat'):
+            elif basename.startswith('stim') and basename.endswith('.dat'):
+                print(f"Added stimulation file: {filename}")
                 self.filenames.append(filename)
-                print(f"Added file: {filename}")
+                self.stim_fids.append(self.open_file(filename))
+            elif basename.startswith('amp') and basename.endswith('.dat'):
+                self.filenames.append(filename)
+                print(f"Added Amp file: {filename}")
                 self.d_fids.append(self.open_file(filename))
 
         # 检查是否所有必需的文件都已添加
-        if self.t_fid and self.d_fids and self.sample_rate:
+        if self.t_fid and self.d_fids and self.stim_fids and self.sample_rate:
             self.ready_to_load = True
 
 
@@ -394,6 +426,10 @@ class RealTimeDataReader:
             for fid in self.d_fids:
                 fid.close()
             self.d_fids = []
+        if self.stim_fids:
+            for fid in self.stim_fids:
+                fid.close()
+            self.stim_fids = []
         # 清空数据队列
         # 注意存在丢失问题，所以何时清空缓冲池中数据后续需要考虑.
         with self.data_queue.mutex:
@@ -528,6 +564,51 @@ class RealTimeDataReader:
             print(f"Current position in data file {i + 1} (after read): {fid.tell()}")
         return np.array(data)
 
+    def _read_stimulation_data(self, num_samples):
+        """
+        以增量形式读取并解析刺激文件数据，Stimdata 数据非0，则代表施加了刺激。
+
+        参数:
+        - num_samples: 整数，指定要读取的样本数量。
+
+        返回值:
+        - 一个字典，包含电流值和状态位信息。
+          - 'Stimdata': 列表，包含所有刺激文件中的电流数据。
+          - 'compliance_limit': 列表，包含合规限制状态数据。
+          - 'charge_recovery': 列表，包含充电恢复状态数据。
+          - 'amplifier_settle': 列表，包含放大器稳定状态数据。
+        """
+
+        stim_data_combined = {
+            'Stimdata': [],
+            'compliance_limit': [],
+            'charge_recovery': [],
+            'amplifier_settle': []
+        }
+
+        for i, fid in enumerate(self.stim_fids):
+            if fid.seekable():
+                fid.seek(self.stored_samples * 2)  # 定位到上次读取的位置
+            print(f"Current position in stim file {i + 1} (before read): {fid.tell()}")
+
+            data = np.fromfile(fid, dtype=np.uint16, count=num_samples)
+            print(f"Current position in stim file {i + 1} (after read): {fid.tell()}")
+
+            current_magnitude = np.bitwise_and(data, 255) * self.stim_step_size
+            sign = (128 - np.bitwise_and(data, 256)) / 128
+            Stimdata = current_magnitude * sign
+
+            compliance_limit = np.bitwise_and(data, 32768) != 0
+            charge_recovery = np.bitwise_and(data, 16384) != 0
+            amplifier_settle = np.bitwise_and(data, 8192) != 0
+
+            stim_data_combined['Stimdata'].append(Stimdata)
+            stim_data_combined['compliance_limit'].append(compliance_limit)
+            stim_data_combined['charge_recovery'].append(charge_recovery)
+            stim_data_combined['amplifier_settle'].append(amplifier_settle)
+
+        return stim_data_combined
+
     def _read_data_trash(self, channel_data_dict, num_samples):
         """
         从所有打开的数据文件中读取指定数量的样本，并应用放大器缩放。
@@ -568,40 +649,42 @@ class RealTimeDataReader:
         - timespan_ms: 整数，表示时间跨度，以毫秒为单位，应为100ms的整数倍。
 
         返回值:
-        - NumPy二维数组，形状为 (通道数, 样本数)，其中样本数为 timespan_ms 转换后的样本数。
+        - NumPy多维数组，形状为 (通道数, 样本数)，其中样本数为 timespan_ms 转换后的样本数。
+        - NumPy多维数组，形状为 (刺激通道数, 样本数)，表示对应的刺激数据。
         - NumPy数组，长度与样本数一致，表示时间戳。
         """
-        # samples_needed = int(self.sample_rate * (timespan_ms / 1000))  # 总样本数
-
         samples_needed = int(25000 * (timespan_ms / 1000))  # 总样本数
-
         blocks_needed = samples_needed // self.samples_per_100ms  # 需要的100ms块数
 
         collected_t = np.empty(0, dtype=np.float32)
         collected_d = np.empty((len(self.d_fids), 0), dtype=np.float32)
+        collected_s = np.empty((len(self.stim_fids), 0), dtype=np.float32)  # 初始化存储刺激数据的数组
 
         blocks_collected = 0
 
         while blocks_collected < blocks_needed:
             try:
-                data_type, channel_data_dict = self.data_queue.get(timeout=1.0)
+                data_type, channel_data_dict = self.data_queue.get(block=False)
 
                 if data_type == 'data':
                     # 提取并拼接时间戳和数据
                     collected_t = np.concatenate((collected_t, channel_data_dict['t']))
                     new_data_d = np.array([channel_data_dict['d'][f'd_{i + 1}'] for i in range(len(self.d_fids))])
+                    new_data_s = np.array([channel_data_dict['s'][f's_{i + 1}'] for i in range(len(self.stim_fids))])
                     collected_d = np.concatenate((collected_d, new_data_d), axis=1)
+                    collected_s = np.concatenate((collected_s, new_data_s), axis=1)  # 拼接刺激数据
                     blocks_collected += 1
             except Exception as e:
                 print(f"Error while reading data: {e}")
                 break
 
         # 检查数据是否足够
-        if collected_t.size >= samples_needed and collected_d.shape[1] >= samples_needed:
-            return collected_d[:, :samples_needed], collected_t[:samples_needed]
+        if collected_t.size >= samples_needed and collected_d.shape[1] >= samples_needed and collected_s.shape[
+            1] >= samples_needed:
+            return collected_d[:, :samples_needed], collected_s[:, :samples_needed], collected_t[:samples_needed]
         else:
             print("Insufficient data available")
-            return None, None
+            return None, None, None
 
     # plot 相关的均是测试用
     def start_plotting_task(self):
@@ -618,89 +701,92 @@ class RealTimeDataReader:
 
     def plotting_task(self):
         """
-        测试缓冲池使用缓冲池数据的绘图任务。
-
-        此方法持续从数据队列中获取数据，并调用plot_channels方法来绘制每个通道的数据图形。
-        在后台线程中持续运行的，不断地监视数据队列，一旦队列中有新的数据，
-        就立即处理并绘制。此方法能够确保实时数据可视化的连续性和流畅性。
-
-        参数:
-        无
-
-        返回值:
-        无
-
-        注意:
-        - 本方法使用了阻塞队列操作`self.data_queue.get`，带有超时设置来避免永久阻塞。
-        - 如果从队列中成功获取到数据，会检查数据类型是否为`'data'`，只处理数据类型为`'data'`的项。
-        - 对于每批获取的数据，会计算通道数量，创建一个适当大小的NumPy数组来存储合并的通道数据，
-          然后调用`plot_channels`方法进行绘图。
-        - 这个使用方法并不好，是直接把整块数据拿出来处理（绘制），之后对于缓冲池的处理方式需要斟酌后修改，这个仅供参考测试.
-
-        示例用法:
-        - 通常，创建一个线程来运行这个方法，以实现数据的实时绘图：
-            threading.Thread(target=reader.plotting_task).start()
+        使用read_data接口进行数据获取并绘制。
+        维持一秒时间窗，并在绘图时标识刺激数据。
         """
+
+        plt.ion()
+        fig, ax = plt.subplots()
+
+        # 获取初始一秒数据，直到队列非空
+        while self.one_second_data_t.size < 25000:
+            try:
+                data_d, data_s, data_t = self.read_data(100)
+                if data_d is not None and data_s is not None and data_t is not None:
+                    self.update_one_second_data(data_t, data_d, data_s)
+                else:
+                    print("Insufficient initial data available, waiting for data...")
+                    time.sleep(0.1)
+            except Exception as e:
+                print(f"Error while initializing one second data: {e}")
+                time.sleep(0.1)
+
+        # 逐步更新100ms数据，维护1s时间窗
         while True:
             try:
-                # 从队列中获取数据
-                data_type, channel_data_dict = self.data_queue.get(block=True, timeout=1.0)
+                # 每次获取100ms的数据
+                new_data_d, new_data_s, new_data_t = self.read_data(100)  # 获取100ms的数据
 
-                if data_type == 'data':
-                    # 解析字典中的数据
-                    t = channel_data_dict['t']
-                    # 调用堆栈中发现 channel_data_dict 中除了时间戳通道，还有一个不知道什么类型的数据，剔除掉.
-                    # 就是说 64 通道的数据块应该是 64个通道数据 + 1个时间戳 65个数据，但是实际有66个数据..
-                    num_channels = len(channel_data_dict) - 2  # 减去时间戳通道
-                    d_combined = np.zeros((num_channels, len(t)))
+                if new_data_d is None or new_data_s is None or new_data_t is None:
+                    print("Insufficient data available")
+                    continue
 
-                    for i in range(1, num_channels + 1):
-                        channel_key = f'd_{i}'
-                        d_combined[i - 1, :] = channel_data_dict[channel_key]
+                # 更新一秒数据
+                self.update_one_second_data(new_data_t, new_data_d, new_data_s)
 
-                    # 数据处理和绘图逻辑
-                    self.plot_channels(t, d_combined)
+                # 绘图
+                self.plot_channels(ax, self.one_second_data_t, self.one_second_data_d, self.one_second_data_s)
+
+                plt.pause(0.1)  # 短暂暂停以更新图形
 
             except Exception as e:
                 print(f"Error in plotting task: {e}")
 
-    def plot_channels(self, t, d):
+    def update_one_second_data(self, new_t, new_d, new_s):
         """
-        绘制多通道数据图。
-
-        此方法根据提供的时间戳和数据绘制每个通道的图形。为了在同一幅图上区分不同通道的数据，
-        每个通道的数据将被垂直偏移。这使得所有通道的数据可以清晰地展示在同一幅图上，而不会发生重叠。
+        更新一秒钟的数据窗口。
 
         参数:
-        - t: NumPy数组，包含每个样本的时间戳。一个数据块内的所有通道共享相同的时间戳。
-        - d: NumPy数组，其形状为(num_channels, num_samples)，包含所有通道的数据。
-             每一行代表一个通道的样本数据。
-
-        返回值:
-        无
+        - new_t: 新的时间戳数据（100ms）。
+        - new_d: 新的通道数据（100ms）。
+        - new_s: 新的刺激数据（100ms）。
         """
+        self.one_second_data_t = np.concatenate((self.one_second_data_t, new_t))[-25000:]
+        self.one_second_data_d = np.concatenate((self.one_second_data_d, new_d), axis=1)[:, -25000:]
+        self.one_second_data_s = np.concatenate((self.one_second_data_s, new_s), axis=1)[:, -25000:]
 
+    def plot_channels(self, ax, t, d, s):
+        """
+        绘制多通道数据图，并标识刺激数据。
+
+        参数:
+        - ax: matplotlib的轴对象。
+        - t: NumPy数组，包含每个样本的时间戳。
+        - d: NumPy数组，其形状为(num_channels, num_samples)，包含所有通道的数据。
+        - s: NumPy数组，其形状为(stim_channels, num_samples)，包含所有刺激数据。
+        """
+        ax.clear()
         num_channels = d.shape[0]
         offset_vector = np.arange(0, num_channels * self.spacing, self.spacing)
         offset_array = np.tile(offset_vector[:, None], (1, len(t)))
         d_offset = d + offset_array
 
-        # 清除现有图像并绘制新数据
-        plt.clf()
         for i in range(num_channels):
-            plt.plot(t, d_offset[i, :])
+            ax.plot(t, d_offset[i, :], label=f'Channel {i + 1}')
 
-        plt.xlabel('Time (s)')
-        plt.ylabel('Amplitude')
-        plt.title('Real-Time Channel Data')
+        # 标识刺激数据
+        for j in range(s.shape[0]):
+            stim_indices = np.nonzero(s[j, :])[0]
+            for idx in stim_indices:
+                ax.axvline(x=t[idx], color='r', linestyle='--', linewidth=0.5)
+
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Amplitude')
+        ax.set_title('Real-Time Channel Data')
+        ax.legend()
         plt.draw()
-        plt.pause(0.01)  # 短暂暂停以更新图形
 
     def testplot(self):
-
-        # 初始化绘图
-        plt.ion()
-        plt.figure()
 
         # 启动绘图线程
         self.start_plotting_task()
@@ -713,9 +799,13 @@ if __name__ == "__main__":
     reader = RealTimeDataReader()
     reader.set_monitoring_directory(directory_to_monitor1)
 
+    # time.sleep(10)
+    # 测试绘图用
+    # reader.testplot()
+
+    # time.sleep(100)
     # 测试目录切换用
     # time.sleep(10)
     # reader.set_monitoring_directory(directory_to_monitor2)
 
-    # 测试绘图用
-    # reader.testplot()
+
