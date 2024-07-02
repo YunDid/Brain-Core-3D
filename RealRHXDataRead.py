@@ -55,6 +55,10 @@ class RealTimeDataReader:
         self.stim_fids = []
         # 刺激数据转化所需步长，目前不明确值为多少
         self.stim_step_size = 10
+        # 通道名列表
+        self.stim_filenames = []
+        # 刺激通道名列表
+        self.amp_filenames = []
         # ----------------------缓冲池设置相关-----------------------
         self.data_queue = Queue()
         self.min_samples_per_read = 1000
@@ -226,11 +230,11 @@ class RealTimeDataReader:
         # self.samples_per_100ms = int(self.sample_rate * 0.1)  # 100ms对应的样本数
         self.samples_per_100ms = int(25000 * 0.1)  # 100ms对应的样本数
 
-        self.temp_data_t = np.empty(0, dtype=np.float32)
-        # 后期准备改，该维度应该与文件描述符列表匹配，在监控到数据产生后进行数据加载
-        self.temp_data_d = np.empty((64, 0), dtype=np.float32)
-        # 这里的6需要与监控到数据后的维度一致
-        self.temp_data_s = np.empty((4, 0), dtype=np.float32)  # 初始化存储刺激数据的临时缓冲区
+        # self.temp_data_t = np.empty(0, dtype=np.float32)
+        # # 后期准备改，该维度应该与文件描述符列表匹配，在监控到数据产生后进行数据加载
+        # self.temp_data_d = np.empty((64, 0), dtype=np.float32)
+        # # 这里的6需要与监控到数据后的维度一致
+        # self.temp_data_s = np.empty((2, 0), dtype=np.float32)  # 初始化存储刺激数据的临时缓冲区
 
         while self.loading_running:
             try:
@@ -353,6 +357,9 @@ class RealTimeDataReader:
         无
         """
 
+        # 新文件产生时，不允许数据继续加载，因为缓冲区维度会变
+        self.ready_to_load = False
+
         # 检查是否为新目录并作处理.
         self.handle_new_subdirectory(filename)
 
@@ -370,15 +377,20 @@ class RealTimeDataReader:
                 print(f"Added stimulation file: {filename}")
                 self.filenames.append(filename)
                 self.stim_fids.append(self.open_file(filename))
+                self.stim_filenames.append(basename)
             elif basename.startswith('amp') and basename.endswith('.dat'):
                 self.filenames.append(filename)
                 print(f"Added Amp file: {filename}")
                 self.d_fids.append(self.open_file(filename))
+                self.amp_filenames.append(basename)
 
         # 检查是否所有必需的文件都已添加
         if self.t_fid and self.d_fids and self.stim_fids and self.sample_rate:
+            # 动态初始化缓冲区的维度
+            self.temp_data_t = np.empty(0, dtype=np.float32)
+            self.temp_data_d = np.empty((len(self.d_fids), 0), dtype=np.float32)
+            self.temp_data_s = np.empty((len(self.stim_fids), 0), dtype=np.float32)
             self.ready_to_load = True
-
 
     def set_monitoring_directory(self, new_directory):
         """
@@ -686,6 +698,25 @@ class RealTimeDataReader:
             print("Insufficient data available")
             return None, None, None
 
+    def get_amp_filenames(self):
+        """
+        获取 amp 文件名列表。
+
+        返回值:
+        - 一个包含 amp 文件名的列表。
+        """
+        return self.amp_filenames
+
+    def get_stim_filenames(self):
+        """
+        获取 stim 文件名列表。
+
+        返回值:
+        - 一个包含 stim 文件名的列表。
+        """
+        return self.stim_filenames
+
+
     # plot 相关的均是测试用
     def start_plotting_task(self):
         """启动绘图线程."""
@@ -790,16 +821,57 @@ class RealTimeDataReader:
 
         # 启动绘图线程
         self.start_plotting_task()
+    
+def monitor_stimulation(self, interval_ms=1000, timespan_ms=100, duration_s=10):
+    """
+    监控刺激数据，定期调用read_data并检查刺激数据中的非零值。
+
+    参数:
+    - interval_ms: 调用read_data的时间间隔，单位为毫秒。
+    - timespan_ms: 每次调用read_data时读取的数据时间范围，单位为毫秒。
+    - duration_s: 总监控时间，单位为秒。
+    """
+    interval_s = interval_ms / 1000  # 转换为秒
+    end_time = time.time() + duration_s
+
+    while time.time() < end_time:
+        amp_data, stim_data, timestamps = self.read_data(timespan_ms)
+        if stim_data is not None:
+            # 返回非零元的行索引与列索引
+            non_zero_stim_indices = np.nonzero(stim_data)
+            if non_zero_stim_indices[0].size > 0:
+                print("Non-zero stimulation detected:")
+                for channel in np.unique(non_zero_stim_indices[0]):
+                    # 基于行索引（施加刺激的通道），找寻非零元的列索引（获取刺激时刻）
+                    channel_indices = non_zero_stim_indices[1][non_zero_stim_indices[0] == channel]
+                    channel_values = stim_data[channel, channel_indices]
+                    print(f"Channel {channel + 1} (indexed from 1) stimulation times and values:")
+                    for time_index, value in zip(channel_indices, channel_values):
+                        print(f"Time Index: {timestamps[time_index]}, Value: {value}")
+            else:
+                print("No stimulation detected in the given timeframe.")
+        else:
+            print("Failed to read stimulation data.")
+        time.sleep(interval_s)
+
 
 
 if __name__ == "__main__":
 
-    directory_to_monitor1 = "E:/TCP/Data/1"  # 要监控的目录
+    directory_to_monitor1 = "E:\\TCP\\Data\\1"  # 要监控的目录
     # directory_to_monitor2 = "E:/TCP/Data/2"  # 要监控的目录
     reader = RealTimeDataReader()
     reader.set_monitoring_directory(directory_to_monitor1)
 
-    # time.sleep(10)
+    # a = reader.get_amp_filenames()
+    # b = reader.get_stim_filenames()
+
+    # c = reader.get_amp_filenames()
+    # d = reader.get_stim_filenames()
+
+    # 监控刺激数据
+    reader.monitor_stimulation(interval_ms=1000, timespan_ms=100, duration_s=10)
+
     # 测试绘图用
     # reader.testplot()
 

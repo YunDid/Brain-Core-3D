@@ -515,7 +515,7 @@ def RunAndStimulateDemo():
     # Test3
     # TestDemo3(scommand)
     # Test4
-    TestDemo4(scommand)
+    TestDemo3(scommand)
     # Test6
     # TestDemo6(scommand)
     # -----------------------------------------------------------------------------------------
