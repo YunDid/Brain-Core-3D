@@ -123,7 +123,7 @@ def _configureStimulation(scommand, channel, source, amplitude, duration, stimen
     :param channel: 要配置的通道名称，例如 'A-010'。
     :param source: 刺激的来源，例如 'keypressf1'。
     :param amplitude: 刺激电流幅度列表，分别代表第一个脉冲幅度与第二个脉冲幅度，单位为微安。 注意非负。
-    :param duration: 时间列表，分别代表第一个刺激脉宽时间，第二个刺激脉宽时间，和刺激后放大器稳定时间，单位为微秒。
+    :param duration: 时间列表，分别代表第一个刺激脉宽时间，第二个刺激脉宽时间，刺激前放大器稳定时间和刺激后放大器稳定时间，单位为微秒。
     :param pulseTrain: “SinglePulse” - 默认 or “PulseTrain”。
     :param numberOfstimpulses: 刺激脉冲数 0-256，仅在 pulseTrain 为 “PulseTrain” 时有效。
     :param stimenabled: 一个布尔值，指示是否启用通道的刺激（True）或禁用（False）。
@@ -151,7 +151,8 @@ def _configureStimulation(scommand, channel, source, amplitude, duration, stimen
     com_secondphasedurationmicroseconds = f'set {channel}.secondphasedurationmicroseconds {duration[1]};'
 
     # 刺激后放大器稳定时间
-    com_poststimampsettlemicroseconds = f'set {channel}.poststimampsettlemicroseconds {duration[2]};'
+    com_prestimampsettlemicroseconds = f'set {channel}.PreStimAmpSettleMicroseconds {duration[2]};'
+    com_poststimampsettlemicroseconds = f'set {channel}.poststimampsettlemicroseconds {duration[3]};'
 
     # 单点与高频刺激类别
     com_pulseortrain = f'set {channel}.PulseOrTrain {pulseTrain};'
@@ -161,14 +162,16 @@ def _configureStimulation(scommand, channel, source, amplitude, duration, stimen
 
         com_numberOfstimpulses = f'set {channel}.NumberOfStimPulses {numberOfstimpulses};'
         com_uploadstimparameters = f'execute uploadstimparameters {channel};'
-        com_config = (com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_secondphaseamplitudemicroamps + com_firstphasedurationmicroseconds + com_secondphasedurationmicroseconds + com_poststimampsettlemicroseconds
+        com_config = (com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_secondphaseamplitudemicroamps + com_firstphasedurationmicroseconds + com_secondphasedurationmicroseconds
+                      + com_prestimampsettlemicroseconds + com_poststimampsettlemicroseconds
                       + com_pulseortrain + com_numberOfstimpulses + com_uploadstimparameters)
     else:
 
     # 单点刺激直接上传
         com_uploadstimparameters = f'execute uploadstimparameters {channel};'
         com_config = (
-                com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_secondphaseamplitudemicroamps + com_firstphasedurationmicroseconds + com_secondphasedurationmicroseconds + com_poststimampsettlemicroseconds
+                com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_secondphaseamplitudemicroamps + com_firstphasedurationmicroseconds + com_secondphasedurationmicroseconds
+                + com_prestimampsettlemicroseconds + com_poststimampsettlemicroseconds
                 + com_pulseortrain + com_uploadstimparameters)
 
     return com_config
@@ -181,7 +184,7 @@ def configureStimulation(scommand, channels, amplitude, duration, trigger):
                      调用者负责使用此套接字发送命令。
     :param channels: 一个包含要配置的通道名称的列表，例如 ['A-010', 'A-011']。
     :param amplitude: 刺激电流幅度列表，分别代表第一个脉冲幅度与第二个脉冲幅度，单位为微安。 注意非负。
-    :param duration: 时间列表，分别代表第一个刺激脉宽时间，第二个刺激脉宽时间，和刺激后放大器稳定时间，单位为微秒。
+    :param duration: 时间列表，分别代表第一个刺激脉宽时间，第二个刺激脉宽时间，刺激前放大器稳定时间和刺激后放大器稳定时间，单位为微秒。
     :param trigger: 字符串，表示触发器 'keypressf1 - keypressf8'。
 
     :return: 包含配置多个通道刺激设置所需的所有命令的字符串。命令用分号连接，并准备通过TCP发送。
@@ -429,21 +432,21 @@ def TestDemo4(scommand):
     channels = ['A-000','A-001','A-002','A-003']
     channels2 = ['A-004', 'A-005', 'A-006', 'A-007']
 
-    command = configureStimulation(scommand,channels, [2550,2550], [5000,5000,500000], "KeyPressF1")
+    command = configureStimulation(scommand,channels, [2550,2550], [5000,5000,200,500000], "KeyPressF1")
     scommand.sendall(command.encode())
 
-    command += configureStimulation(scommand, channels2, [2550,2550], [5000, 5000, 500000], "KeyPressF2")
-    scommand.sendall(command.encode())
+    # command += configureStimulation(scommand, channels2, [2550,2550], [5000, 5000,200,500000], "KeyPressF2")
+    # scommand.sendall(command.encode())
 
-    scommand.sendall(b'set runmode run;')
+    # scommand.sendall(b'set runmode run;')
 
     time.sleep(1)
 
-    TriggerStimulation(scommand, 'f1')
-
-    time.sleep(3)
-
-    TriggerStimulation(scommand, 'f2')
+    # TriggerStimulation(scommand, 'f1')
+    #
+    # time.sleep(3)
+    #
+    # TriggerStimulation(scommand, 'f2')
 
 
 
@@ -515,7 +518,7 @@ def RunAndStimulateDemo():
     # Test3
     # TestDemo3(scommand)
     # Test4
-    TestDemo3(scommand)
+    TestDemo4(scommand)
     # Test6
     # TestDemo6(scommand)
     # -----------------------------------------------------------------------------------------
