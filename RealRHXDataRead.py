@@ -1,11 +1,15 @@
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from log_manager import LogManager
 
 import numpy as np
 import os
 import time
 import matplotlib.pyplot as plt
 import struct  # 用于处理二进制数据
+
+import datetime
+
 
 from threading import Thread, Event
 from queue import Queue
@@ -23,7 +27,7 @@ class FileMonitorHandler(FileSystemEventHandler):
     def on_created(self, event):
         if event.is_directory:
             # 新目录创建，打印路径，但不在这里处理
-            print(f"New directory created: {event.src_path}")
+            self.logger.debug(f"New directory created: {event.src_path}")
         if any(event.src_path.endswith(ext) for ext in ['.dat', '.rhs']):
             # if self.latestfile != event.src_path:
             self.reader.handle_new_file(event.src_path)
@@ -31,7 +35,7 @@ class FileMonitorHandler(FileSystemEventHandler):
 
 class RealTimeDataReader:
     # 数据实时读取类
-    def __init__(self):
+    def __init__(self, log_manager):
 
         # ----------------------目录监控相关-----------------------
         # 在监控的父级目录.
@@ -46,7 +50,7 @@ class RealTimeDataReader:
         self.filenames = []
         self.timestamp_filename = None
         # 采样率将从 info 文件中读取
-        self.sample_rate = None
+        self.sample_rate = 30000
         # 文件描述符列表.
         self.d_fids = []
         # 时间戳数据文件描述符
@@ -88,6 +92,10 @@ class RealTimeDataReader:
         self.one_second_data_t = np.empty(0, dtype=np.float32)
         self.one_second_data_d = np.empty((64, 0), dtype=np.float32)  # 假设有64个数据通道
         self.one_second_data_s = np.empty((6, 0), dtype=np.float32)   # 假设有6个刺激通道
+        
+        # ----------------------设置日志输出-----------------------
+        self.log_manager = log_manager  # 使用LogManager实例
+        self.logger = log_manager.get_logger()  # 获取self.logger实例
 
         # ----------------------多线程相关-----------------------
         # 监控线程
@@ -107,6 +115,12 @@ class RealTimeDataReader:
 
         # 启动队列监控线程，若启用定时器，不使用多线程
         # self.start_monitoring_Queue()
+    
+    def setup_logging(self, log_file_path):
+        """设置log存储"""
+        log_folder = os.path.dirname(log_file_path)
+        os.makedirs(log_folder, exist_ok=True)
+        self.logger.add(log_file_path, rotation="100 MB")  # Rotates the log file when it reaches 10MB
 
     def start_monitoring_Queue(self):
         """启动监控线程"""
@@ -130,7 +144,7 @@ class RealTimeDataReader:
             self.observer.schedule(event_handler, self.directory_to_monitor, recursive=True)
             self.observer.start()
             self.monitor_running = True
-            print("Started monitoring directory:", self.directory_to_monitor)
+            self.logger.debug("Started monitoring directory:", self.directory_to_monitor)
 
     def stop_monitoring(self):
         """停止文件监视器并等待其完全停止。"""
@@ -140,7 +154,7 @@ class RealTimeDataReader:
             self.observer.join()  # 等待监控线程完全停止
             self.observer.unschedule_all()  # 清除所有监控任务
             self.monitor_running = False
-            print("Stopped monitoring directory:", self.directory_to_monitor)
+            self.logger.debug("Stopped monitoring directory:", self.directory_to_monitor)
 
     def start_data_loading_thread(self):
         """启动数据加载线程"""
@@ -179,11 +193,11 @@ class RealTimeDataReader:
         while self.monitor_running_queue:
             try:
                 queue_size = self.data_queue.qsize()
-                print(f"Current queue size: {queue_size}")
+                self.logger.debug(f"Current queue size: {queue_size}")
 
                 if queue_size > self.max_queue_size:
                     items_removed = 0
-                    print("Queue exceeds max size, discarding old data")
+                    self.logger.debug("Queue exceeds max size, discarding old data")
 
                     while self.data_queue.qsize() > self.safe_queue_size:
                         try:
@@ -192,11 +206,11 @@ class RealTimeDataReader:
                         except Empty:
                             break
 
-                    print(f"Removed {items_removed} items from the queue to reach the safe size.")
+                    self.logger.debug(f"Removed {items_removed} items from the queue to reach the safe size.")
 
                 time.sleep(self.monitor_interval)
             except Exception as e:
-                print(f"Error in queue monitoring task: {e}")
+                self.logger.debug(f"Error in queue monitoring task: {e}")
                 time.sleep(0.1)
 
     def data_loading_task(self):
@@ -228,7 +242,7 @@ class RealTimeDataReader:
         """
 
         # self.samples_per_100ms = int(self.sample_rate * 0.1)  # 100ms对应的样本数
-        self.samples_per_100ms = int(25000 * 0.1)  # 100ms对应的样本数
+        self.samples_per_100ms = int(self.sample_rate * 0.1)  # 100ms对应的样本数
 
         # self.temp_data_t = np.empty(0, dtype=np.float32)
         # # 后期准备改，该维度应该与文件描述符列表匹配，在监控到数据产生后进行数据加载
@@ -239,8 +253,10 @@ class RealTimeDataReader:
         while self.loading_running:
             try:
                 if not self.ready_to_load:
-                    time.sleep(0.1)
+                    time.sleep(0.01)
                     continue
+
+                self.logger.debug(f"Start data loading time: {time.time()}.")
 
                 available_samples_t = os.path.getsize(self.timestamp_filename) // 4
                 available_samples_d = min(os.path.getsize(f) // 2 for f in self.filenames) if self.filenames else 0
@@ -279,6 +295,8 @@ class RealTimeDataReader:
                                 channel_data_dict['s'][stim_key] = block_data_s[j, :]
 
                             self.data_queue.put(('data', channel_data_dict))
+                    
+                        self.logger.debug(f"End data loading time: {time.time()}.")
 
                         # 更新剩余数据
                         self.temp_data_t = self.temp_data_t[end_idx:]
@@ -286,14 +304,14 @@ class RealTimeDataReader:
                         self.temp_data_s = self.temp_data_s[:, end_idx:]  # 更新剩余刺激数据
 
                     self.stored_samples += num_samples
-                    print(f"current_storing_samples: {num_samples}")
-                    print(f"stored_samples: {self.stored_samples}")
-                    print(f"Size of the queue: {self.data_queue.qsize()}\n")
+                    self.logger.debug(f"current_storing_samples: {num_samples}")
+                    self.logger.debug(f"stored_samples: {self.stored_samples}")
+                    self.logger.debug(f"Size of the queue: {self.data_queue.qsize()}\n")
                 else:
-                    time.sleep(0.1)
+                    time.sleep(0.01)
             except Exception as e:
-                print(f"Error loading data: {e}")
-                time.sleep(0.1)
+                self.logger.debug(f"Error loading data: {e}")
+                time.sleep(0.01)
 
     def handle_new_subdirectory(self, filename):
         """
@@ -314,7 +332,7 @@ class RealTimeDataReader:
 
         # 如果最新子目录为空，或者新文件所在目录与最新子目录不同，更新目录
         if self.latest_subdirectory is None or self.latest_subdirectory != new_subdirectory:
-            print(f"Switching to new directory: {new_subdirectory}")
+            self.logger.debug(f"Switching to new directory: {new_subdirectory}")
             self.latest_subdirectory = new_subdirectory
 
             # 重置文件名列表和其他相关状态
@@ -374,13 +392,13 @@ class RealTimeDataReader:
             elif 'info.rhs' in filename:
                 self.read_sample_rate_from_info_file(filename)
             elif basename.startswith('stim') and basename.endswith('.dat'):
-                print(f"Added stimulation file: {filename}")
+                self.logger.debug(f"Added stimulation file: {filename}")
                 self.filenames.append(filename)
                 self.stim_fids.append(self.open_file(filename))
                 self.stim_filenames.append(basename)
             elif basename.startswith('amp') and basename.endswith('.dat'):
                 self.filenames.append(filename)
-                print(f"Added Amp file: {filename}")
+                self.logger.debug(f"Added Amp file: {filename}")
                 self.d_fids.append(self.open_file(filename))
                 self.amp_filenames.append(basename)
 
@@ -412,13 +430,13 @@ class RealTimeDataReader:
         - 在调用此方法时，请确保新目录是有效的，并且应用程序有权限访问该目录。
         """
 
-        print(f"Updating monitoring directory to: {new_directory}")
+        self.logger.debug(f"Updating monitoring directory to: {new_directory}")
 
         # 使用self.monitor_running来判断监控线程的状态
         if self.monitor_running:
             # 调用stop_monitoring方法来停止当前的监控活动
             self.stop_monitoring()
-            print("Directory monitoring stopped.")
+            self.logger.debug("Directory monitoring stopped.")
 
         # 停止数据加载线程的加载，防止加载 None 对象
         self.ready_to_load = False
@@ -451,7 +469,7 @@ class RealTimeDataReader:
 
         # 重新启动监控到新的目录
         self.start_monitoring()
-        print("Monitoring restarted for the new directory.")
+        self.logger.debug("Monitoring restarted for the new directory.")
 
     def read_sample_rate_from_info_file(self, info_filename):
         """
@@ -475,7 +493,7 @@ class RealTimeDataReader:
                 # 读取采样率 (float32)
                 self.sample_rate = struct.unpack('f', info_file.read(4))[0]
         except IOError:
-            print(f"Failed to read {info_filename}. Is it in this directory?")
+            self.logger.debug(f"Failed to read {info_filename}. Is it in this directory?")
 
     def open_file(self, filename):
         """
@@ -497,7 +515,7 @@ class RealTimeDataReader:
             fid = open(filename, 'rb')
             return fid
         except IOError:
-            print(f"Failed to read {filename}. Is it in this directory?")
+            self.logger.debug(f"Failed to read {filename}. Is it in this directory?")
             return None
 
     def open_files(self, filenames):
@@ -547,9 +565,9 @@ class RealTimeDataReader:
         if self.t_fid.seekable():
             self.t_fid.seek(self.stored_samples * 4)  # 定位到上次读取的位置
 
-        print(f"Current position in timestamp file (before read): {self.t_fid.tell()}")
+        self.logger.debug(f"Current position in timestamp file (before read): {self.t_fid.tell()}")
         t_data = np.fromfile(self.t_fid, dtype=np.int32, count=num_samples)
-        print(f"Current position in timestamp file (after read): {self.t_fid.tell()}")
+        self.logger.debug(f"Current position in timestamp file (after read): {self.t_fid.tell()}")
 
         return t_data / self.sample_rate
 
@@ -570,10 +588,10 @@ class RealTimeDataReader:
         for i, fid in enumerate(self.d_fids):
             if fid.seekable():
                 fid.seek(self.stored_samples * 2)
-            print(f"Current position in data file {i + 1} (before read): {fid.tell()}")
+            self.logger.debug(f"Current position in data file {i + 1} (before read): {fid.tell()}")
             d_data = np.fromfile(fid, dtype=np.int16, count=num_samples)
             data.append(d_data * self.d_scale)
-            print(f"Current position in data file {i + 1} (after read): {fid.tell()}")
+            self.logger.debug(f"Current position in data file {i + 1} (after read): {fid.tell()}")
         return np.array(data)
 
     def _read_stimulation_data(self, num_samples):
@@ -601,10 +619,10 @@ class RealTimeDataReader:
         for i, fid in enumerate(self.stim_fids):
             if fid.seekable():
                 fid.seek(self.stored_samples * 2)  # 定位到上次读取的位置
-            print(f"Current position in stim file {i + 1} (before read): {fid.tell()}")
+            self.logger.debug(f"Current position in stim file {i + 1} (before read): {fid.tell()}")
 
             data = np.fromfile(fid, dtype=np.uint16, count=num_samples)
-            print(f"Current position in stim file {i + 1} (after read): {fid.tell()}")
+            self.logger.debug(f"Current position in stim file {i + 1} (after read): {fid.tell()}")
 
             current_magnitude = np.bitwise_and(data, 255) * self.stim_step_size
             sign = (128 - np.bitwise_and(data, 256)) / 128
@@ -648,10 +666,10 @@ class RealTimeDataReader:
             channel_key = f'd_{i + 1}'  # 使用通道标识作为字典键
             if fid.seekable():
                 fid.seek(self.stored_samples * 2)  # 定位到上次读取的
-            print(f"Current position in data file {i + 1} (before read): {fid.tell()}")
+            self.logger.debug(f"Current position in data file {i + 1} (before read): {fid.tell()}")
             d_data = np.fromfile(fid, dtype=np.int16, count=num_samples)
             channel_data_dict[channel_key] = d_data * self.d_scale
-            print(f"Current position in data file {i + 1} (after read): {fid.tell()}")
+            self.logger.debug(f"Current position in data file {i + 1} (after read): {fid.tell()}")
 
     def read_data(self, timespan_ms):
         """
@@ -665,7 +683,9 @@ class RealTimeDataReader:
         - NumPy多维数组，形状为 (刺激通道数, 样本数)，表示对应的刺激数据。
         - NumPy数组，长度与样本数一致，表示时间戳。
         """
-        samples_needed = int(25000 * (timespan_ms / 1000))  # 总样本数
+
+        self.logger.debug(f"Start read_data time: {time.time()}.")
+        samples_needed = int(self.sample_rate * (timespan_ms / 1000))  # 总样本数
         blocks_needed = samples_needed // self.samples_per_100ms  # 需要的100ms块数
 
         collected_t = np.empty(0, dtype=np.float32)
@@ -687,15 +707,16 @@ class RealTimeDataReader:
                     collected_s = np.concatenate((collected_s, new_data_s), axis=1)  # 拼接刺激数据
                     blocks_collected += 1
             except Exception as e:
-                print(f"Error while reading data: {e}")
+                self.logger.debug(f"Error while reading data: {e}")
                 break
-
+        
+        self.logger.debug(f"End read_data time: {time.time()}.")
         # 检查数据是否足够
         if collected_t.size >= samples_needed and collected_d.shape[1] >= samples_needed and collected_s.shape[
             1] >= samples_needed:
             return collected_d[:, :samples_needed], collected_s[:, :samples_needed], collected_t[:samples_needed]
         else:
-            print("Insufficient data available")
+            self.logger.debug("Insufficient data available")
             return None, None, None
 
     def get_amp_filenames(self):
@@ -715,7 +736,6 @@ class RealTimeDataReader:
         - 一个包含 stim 文件名的列表。
         """
         return self.stim_filenames
-
 
     # plot 相关的均是测试用
     def start_plotting_task(self):
@@ -746,10 +766,10 @@ class RealTimeDataReader:
                 if data_d is not None and data_s is not None and data_t is not None:
                     self.update_one_second_data(data_t, data_d, data_s)
                 else:
-                    print("Insufficient initial data available, waiting for data...")
+                    self.logger.debug("Insufficient initial data available, waiting for data...")
                     time.sleep(0.1)
             except Exception as e:
-                print(f"Error while initializing one second data: {e}")
+                self.logger.debug(f"Error while initializing one second data: {e}")
                 time.sleep(0.1)
 
         # 逐步更新100ms数据，维护1s时间窗
@@ -759,7 +779,7 @@ class RealTimeDataReader:
                 new_data_d, new_data_s, new_data_t = self.read_data(100)  # 获取100ms的数据
 
                 if new_data_d is None or new_data_s is None or new_data_t is None:
-                    print("Insufficient data available")
+                    self.logger.debug("Insufficient data available")
                     continue
 
                 # 更新一秒数据
@@ -771,7 +791,7 @@ class RealTimeDataReader:
                 plt.pause(0.1)  # 短暂暂停以更新图形
 
             except Exception as e:
-                print(f"Error in plotting task: {e}")
+                self.logger.debug(f"Error in plotting task: {e}")
 
     def update_one_second_data(self, new_t, new_d, new_s):
         """
@@ -840,18 +860,18 @@ def monitor_stimulation(self, interval_ms=1000, timespan_ms=100, duration_s=10):
             # 返回非零元的行索引与列索引
             non_zero_stim_indices = np.nonzero(stim_data)
             if non_zero_stim_indices[0].size > 0:
-                print("Non-zero stimulation detected:")
+                self.logger.debug("Non-zero stimulation detected:")
                 for channel in np.unique(non_zero_stim_indices[0]):
                     # 基于行索引（施加刺激的通道），找寻非零元的列索引（获取刺激时刻）
                     channel_indices = non_zero_stim_indices[1][non_zero_stim_indices[0] == channel]
                     channel_values = stim_data[channel, channel_indices]
-                    print(f"Channel {channel + 1} (indexed from 1) stimulation times and values:")
+                    self.logger.debug(f"Channel {channel + 1} (indexed from 1) stimulation times and values:")
                     for time_index, value in zip(channel_indices, channel_values):
-                        print(f"Time Index: {timestamps[time_index]}, Value: {value}")
+                        self.logger.debug(f"Time Index: {timestamps[time_index]}, Value: {value}")
             else:
-                print("No stimulation detected in the given timeframe.")
+                self.logger.debug("No stimulation detected in the given timeframe.")
         else:
-            print("Failed to read stimulation data.")
+            self.logger.debug("Failed to read stimulation data.")
         time.sleep(interval_s)
 
 
@@ -860,7 +880,10 @@ if __name__ == "__main__":
 
     directory_to_monitor1 = "E:\\TCP\\Data\\1"  # 要监控的目录
     # directory_to_monitor2 = "E:/TCP/Data/2"  # 要监控的目录
-    reader = RealTimeDataReader()
+
+    # 初始化日志管理器
+    log_manager = LogManager()
+    reader = RealTimeDataReader(log_manager)
     reader.set_monitoring_directory(directory_to_monitor1)
 
     # a = reader.get_amp_filenames()
@@ -870,7 +893,7 @@ if __name__ == "__main__":
     # d = reader.get_stim_filenames()
 
     # 监控刺激数据
-    reader.monitor_stimulation(interval_ms=1000, timespan_ms=100, duration_s=10)
+    # reader.monitor_stimulation(interval_ms=1000, timespan_ms=100, duration_s=10)
 
     # 测试绘图用
     # reader.testplot()
