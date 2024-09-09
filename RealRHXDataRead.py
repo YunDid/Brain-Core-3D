@@ -10,7 +10,6 @@ import struct  # 用于处理二进制数据
 
 import datetime
 
-
 from threading import Thread, Event
 from queue import Queue
 import sys
@@ -32,6 +31,130 @@ class FileMonitorHandler(FileSystemEventHandler):
             # if self.latestfile != event.src_path:
             self.reader.handle_new_file(event.src_path)
             # self.latestfile = event.src_path
+
+
+class CircularBuffer:
+    def __init__(self, capacity):
+        """
+        初始化环形缓冲区。
+
+        参数:
+            capacity (int): 缓冲区的容量。
+        """
+        self.capacity = capacity
+        self.buffer = [None] * capacity
+        self.head = 0
+        self.size = 0
+        self.read_index = 0
+
+        # ----------------------设置日志输出-----------------------
+        self.log_manager = log_manager  # 使用LogManager实例
+        self.logger = log_manager.get_logger()  # 获取self.logger实例
+
+    def setup_logging(self, log_file_path):
+        """设置log存储"""
+        log_folder = os.path.dirname(log_file_path)
+        os.makedirs(log_folder, exist_ok=True)
+        self.logger.add(log_file_path, rotation="100 MB")  # Rotates the log file when it reaches 10MB
+
+    def write(self, data):
+        """
+        将数据写入缓冲区。
+
+        参数:
+            data (any): 要写入的数据。
+        """
+        index = (self.head + self.size) % self.capacity
+        self.buffer[index] = data
+        if self.size < self.capacity:
+            self.size += 1
+        else:
+            self.head = (self.head + 1) % self.capacity
+
+    def read(self, index=0):
+        """
+        读取缓冲区中指定索引处的数据。
+
+        参数:
+            index (int): 从最老的数据算起的索引（0是最老的，size-1是最新的）。
+
+        返回:
+            (any): 位于指定索引处的数据。
+        """
+        if index >= self.size:
+            return None  # 索引超出当前存储的数据量
+        actual_index = (self.head + index) % self.capacity
+        return self.buffer[actual_index]
+
+    def read_next(self):
+        """
+        读取下一个数据项，并自动更新读取索引。
+
+        返回:
+            (any): 从缓冲区中读取的下一个数据项，如果没有更多数据则返回 None。
+        """
+        if self.size == 0 or self.read_index >= self.size:
+            return None
+        actual_index = (self.head + self.read_index) % self.capacity
+        data = self.buffer[actual_index]
+        self.read_index = (self.read_index + 1) % self.capacity  # 更新读取索引
+        return data
+
+    def read_newest(self):
+        """
+        获取缓冲区中最新的数据。
+
+        返回:
+            (any): 缓冲区中最新的数据。
+        """
+        if self.size == 0:
+            return None
+        latest_index = (self.head + self.size - 1) % self.capacity
+        return self.buffer[latest_index]
+
+    def read_optimized(self):
+        """
+        尝试读取最新的数据，如果数据落后太多，则跳跃到接近最新的位置。
+        """
+        if self.size == 0 or self.read_index >= self.size:
+            return None
+
+        # 计算理论上的最新索引
+        latest_index = (self.head + self.size - 1) % self.capacity
+
+        # 计算当前读取索引与最新索引的差距
+        gap = (latest_index - self.read_index + self.capacity) % self.capacity
+
+        # 如果差距太大，说明读取落后太多，需要跳跃
+        base_gap = 5
+        if gap > base_gap:  # 例如，如果落后超过500ms，则更新指针
+            self.logger.debug("f---------------------------------------------已积累50ms延迟，需要进行修正---------------------------------------")
+            # self.read_index = (latest_index - base_gap + self.capacity) % self.capacity  # 跳跃到较新的位置
+            self.read_index = latest_index  # 跳到最新数据位置
+
+        # 读取当前的数据
+        data = self.buffer[self.read_index]
+        self.read_index = (self.read_index + 1) % self.capacity  # 更新读取索引
+        return data
+
+    def clear(self):
+        """清除缓冲区中的所有数据。"""
+        self.head = 0
+        self.size = 0
+        self.buffer = [None] * self.capacity
+
+    def read_all(self):
+        """读取缓冲区中的所有数据，从最老到最新。
+
+        返回:
+            list: 包含缓冲区中所有数据的列表。
+        """
+        items = []
+        for i in range(self.size):
+            items.append(self.buffer[(self.head + i) % self.capacity])
+        return items
+
+
 
 class RealTimeDataReader:
     # 数据实时读取类
@@ -70,6 +193,8 @@ class RealTimeDataReader:
         self.stored_samples = 0
         # 放大器数据数据缩放
         self.d_scale = 0.195
+        # -----------------------实时环形缓冲池-----------------------
+        self.circular_buffer = CircularBuffer(20)  # 设定环形缓冲区的大小
 
         # 临时存储数据缓冲区
         self.samples_per_100ms = None  # 在 `data_loading_task` 中进行初始化
@@ -307,6 +432,106 @@ class RealTimeDataReader:
                     self.logger.debug(f"current_storing_samples: {num_samples}")
                     self.logger.debug(f"stored_samples: {self.stored_samples}")
                     self.logger.debug(f"Size of the queue: {self.data_queue.qsize()}\n")
+                else:
+                    time.sleep(0.01)
+            except Exception as e:
+                self.logger.debug(f"Error loading data: {e}")
+                time.sleep(0.01)
+
+    def data_loading_task_inCircular(self):
+        """
+        数据加载任务的主循环。
+
+        此方法作为一个后台线程运行，负责周期性地检查是否有新的数据文件就绪
+        并从这些文件中读取数据。读取的数据会被缩放并以字典的形式放入环形缓冲池中，
+        供其他部分的代码进一步处理。
+
+        注意该接口读取逻辑为最大化读取，重组切割后存储，使得每个元素为 100 ms 的数据块.
+
+        方法执行流程：
+        1. 检查是否所有必需的文件描述符都已就绪。如果没有，等待0.1秒后再次检查。
+        2. 计算当前可用的样本数量，基于时间戳文件和数据文件的大小。
+        3. 如果可用的样本数量大于设定的缓冲大小，则从文件中读取这些样本。
+        4. 从时间戳文件中读取时间戳数据，并从每个数据文件中读取样本数据。
+        5. 将读取的数据缩放重组后存入字典，然后将字典放入队列中。
+        6. 更新已存储的样本数量，并打印当前队列的状态信息。
+
+        参数:
+        无
+
+        返回值:
+        无
+
+        注意:
+        - 在数据文件格式或采样率发生变化时，需要相应地调整读取和缩放逻辑。
+        """
+
+        # self.samples_per_100ms = int(self.sample_rate * 0.1)  # 100ms对应的样本数
+        self.samples_per_100ms = int(self.sample_rate * 0.1)  # 100ms对应的样本数
+
+        # self.temp_data_t = np.empty(0, dtype=np.float32)
+        # # 后期准备改，该维度应该与文件描述符列表匹配，在监控到数据产生后进行数据加载
+        # self.temp_data_d = np.empty((64, 0), dtype=np.float32)
+        # # 这里的6需要与监控到数据后的维度一致
+        # self.temp_data_s = np.empty((2, 0), dtype=np.float32)  # 初始化存储刺激数据的临时缓冲区
+
+        while self.loading_running:
+            try:
+                if not self.ready_to_load:
+                    time.sleep(0.01)
+                    continue
+
+                self.logger.debug(f"Start data loading time: {time.time()}.")
+
+                available_samples_t = os.path.getsize(self.timestamp_filename) // 4
+                available_samples_d = min(os.path.getsize(f) // 2 for f in self.filenames) if self.filenames else 0
+                available_samples = min(available_samples_t, available_samples_d)
+                num_samples = available_samples - self.stored_samples
+
+                if num_samples >= self.min_samples_per_read:
+                    # 读取新的数据
+                    new_data_t = self._read_timestamp(num_samples)
+                    new_data_d = self._read_data(num_samples)
+                    new_data_s = self._read_stimulation_data(num_samples)["Stimdata"]
+
+                    # 将新数据添加到临时缓冲区
+                    self.temp_data_t = np.concatenate((self.temp_data_t, new_data_t))
+                    self.temp_data_d = np.concatenate((self.temp_data_d, new_data_d), axis=1)
+                    self.temp_data_s = np.concatenate((self.temp_data_s, new_data_s), axis=1)
+
+                    # 计算可以生成多少个完整的100ms块
+                    complete_blocks = self.temp_data_t.size // self.samples_per_100ms
+
+                    if complete_blocks > 0:
+                        end_idx = complete_blocks * self.samples_per_100ms
+
+                        for start in range(0, end_idx, self.samples_per_100ms):
+                            block_data_t = self.temp_data_t[start:start + self.samples_per_100ms]
+                            block_data_d = self.temp_data_d[:, start:start + self.samples_per_100ms]
+                            block_data_s = self.temp_data_s[:, start:start + self.samples_per_100ms]  # 获取刺激数据块
+                            channel_data_dict = {'t': block_data_t, 'd': {}, 's': {}}  # 添加刺激数据到字典
+
+                            for i, fid in enumerate(self.d_fids):
+                                channel_key = f'd_{i + 1}'
+                                channel_data_dict['d'][channel_key] = block_data_d[i, :]
+
+                            for j, s_fid in enumerate(self.stim_fids):
+                                stim_key = f's_{j + 1}'
+                                channel_data_dict['s'][stim_key] = block_data_s[j, :]
+
+                            self.circular_buffer.write(channel_data_dict)
+
+                        self.logger.debug(f"End data loading time: {time.time()}.")
+
+                        # 更新剩余数据
+                        self.temp_data_t = self.temp_data_t[end_idx:]
+                        self.temp_data_d = self.temp_data_d[:, end_idx:]
+                        self.temp_data_s = self.temp_data_s[:, end_idx:]  # 更新剩余刺激数据
+
+                    self.stored_samples += num_samples
+                    self.logger.debug(f"current_storing_samples: {num_samples}")
+                    self.logger.debug(f"stored_samples: {self.stored_samples}")
+                    self.logger.debug(f"Size of the queue: {self.circular_buffer.size}\n")
                 else:
                     time.sleep(0.01)
             except Exception as e:
@@ -716,6 +941,56 @@ class RealTimeDataReader:
             1] >= samples_needed:
             return collected_d[:, :samples_needed], collected_s[:, :samples_needed], collected_t[:samples_needed]
         else:
+            self.logger.debug("Insufficient data available")
+            return None, None, None
+
+    def read_data_inC(self, timespan_ms):
+        """
+        根据指定的时间跨度（毫秒）从环形缓冲区中读取拼接后的二维数组和时间戳。
+
+        参数:
+        - timespan_ms: 整数，表示时间跨度，以毫秒为单位，应为100ms的整数倍。
+
+        返回值:
+        - NumPy多维数组，形状为 (通道数, 样本数)，其中样本数为 timespan_ms 转换后的样本数。
+        - NumPy多维数组，形状为 (刺激通道数, 样本数)，表示对应的刺激数据。
+        - NumPy数组，长度与样本数一致，表示时间戳。
+        """
+
+        # self.logger.debug(f"Start read_data time: {time.time()}.")
+        samples_needed = int(self.sample_rate * (timespan_ms / 1000))
+        blocks_needed = samples_needed // self.samples_per_100ms
+
+        collected_t = np.empty(0, dtype=np.float32)
+        collected_d = np.empty((len(self.d_fids), 0), dtype=np.float32)
+        collected_s = np.empty((len(self.stim_fids), 0), dtype=np.float32)
+
+        blocks_collected = 0
+
+        while blocks_collected < blocks_needed:
+            if self.circular_buffer.size > 0:  # 确保缓冲区内有数据
+                # 从环形缓冲区读取最新的数据块
+                channel_data_dict = self.circular_buffer.read()
+
+                # 提取并拼接时间戳和数据
+                collected_t = np.concatenate((collected_t, channel_data_dict['t']))
+                new_data_d = np.array([channel_data_dict['d'][f'd_{i + 1}'] for i in range(len(self.d_fids))])
+                new_data_s = np.array([channel_data_dict['s'][f's_{i + 1}'] for i in range(len(self.stim_fids))])
+                collected_d = np.concatenate((collected_d, new_data_d), axis=1)
+                collected_s = np.concatenate((collected_s, new_data_s), axis=1)
+                blocks_collected += 1
+            else:
+                # self.logger.debug("No new data available in the buffer.")
+                self.logger.debug("No new data available in the buffer.")
+                break
+
+        self.logger.debug(f"End read_data time: {time.time()}.")
+        # 检查数据是否足够
+        if collected_t.size >= samples_needed and collected_d.shape[1] >= samples_needed and collected_s.shape[
+            1] >= samples_needed:
+            return collected_d[:, :samples_needed], collected_s[:, :samples_needed], collected_t[:samples_needed]
+        else:
+            # self.logger.debug("Insufficient data available")
             self.logger.debug("Insufficient data available")
             return None, None, None
 
