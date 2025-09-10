@@ -1,5 +1,0 @@
-2024-07-22 18:04:39.310 | DEBUG    | __main__:<module>:11 - This is a debug message.
-2024-07-22 18:04:39.311 | INFO     | __main__:<module>:12 - This is an info message.
-2024-07-22 18:04:39.311 | WARNING  | __main__:<module>:13 - This is a warning message.
-2024-07-22 18:04:39.311 | ERROR    | __main__:<module>:14 - This is an error message.
-2024-07-22 18:04:39.312 | CRITICAL | __main__:<module>:15 - This is a critical message.

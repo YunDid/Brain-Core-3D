@@ -1,3 +1,0 @@
-2024-07-22 18:09:45.082 | DEBUG    | __main__:set_monitoring_directory:433 - Updating monitoring directory to: E:\TCP\Data\1
-2024-07-22 18:09:45.083 | DEBUG    | __main__:start_monitoring:147 - Started monitoring directory:
-2024-07-22 18:09:45.084 | DEBUG    | __main__:set_monitoring_directory:472 - Monitoring restarted for the new directory.

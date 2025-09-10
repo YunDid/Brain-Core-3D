@@ -1,0 +1,5 @@
+2025-07-22 15:37:16.157 | INFO     | xxx:<module>:96 - ctnd
+2025-07-22 15:37:16.158 | INFO     | main:<module>:97 - 程序启动
+2025-07-22 15:37:16.158 | DEBUG    | file_processor:<module>:98 - 处理文件: test.dat
+2025-07-22 15:37:16.158 | WARNING  | main:<module>:99 - 这是一个警告
+2025-07-22 15:37:16.159 | ERROR    | main:<module>:100 - 这是一个错误

@@ -112,7 +112,183 @@ def ensure_controller_stopped(scommand, command_buffer_size):
         print('Controller is already stopped.')
 
 
-def _configureStimulation(scommand, channel, source, amplitude, duration, stimenabled, pulseTrain="SinglePulse", numberOfstimpulses=2):
+def cancel_config(scommand, channels):
+    """
+    根据输入的通道、取消参数设置，以便下一次设置启动。
+    """
+
+    com_configs = []
+
+    for channel in channels:
+        com_stimenabled_T = f'set {channel}.stimenabled True;'
+        com_stimenabled_F = f'set {channel}.stimenabled False;'
+        com_poststimampsettlemicroseconds = f'set {channel}.poststimampsettlemicroseconds 1000;'
+        com_RefractoryPeriodMicroseconds = f'set {channel}.RefractoryPeriodMicroseconds 1000;'
+        com_uploadstimparameters = f'execute uploadstimparameters {channel};'
+        com_config = f'set {channel}.stimenabled False;' + com_poststimampsettlemicroseconds + com_RefractoryPeriodMicroseconds + com_uploadstimparameters + com_stimenabled_T + com_stimenabled_F + com_stimenabled_F + com_stimenabled_T + com_stimenabled_F
+        com_configs.append(com_config)
+
+    com_config = ';'.join(com_configs)
+    scommand.sendall(com_config.encode())
+    time.sleep(0.1)
+
+def use_config(scommand, channels):
+    """
+    根据输入的通道、取消参数设置，以便下一次设置启动。
+    """
+
+    com_configs = []
+
+    for channel in channels:
+        com_poststimampsettlemicroseconds = f'set {channel}.poststimampsettlemicroseconds 1000;'
+        com_RefractoryPeriodMicroseconds = f'set {channel}.RefractoryPeriodMicroseconds 1000;'
+        com_uploadstimparameters = f'execute uploadstimparameters {channel};'
+        com_config = f'set {channel}.stimenabled True;' + com_poststimampsettlemicroseconds + com_RefractoryPeriodMicroseconds + com_uploadstimparameters
+        com_configs.append(com_config)
+
+    com_config = ';'.join(com_configs)
+    scommand.sendall(com_config.encode())
+    time.sleep(0.01)
+    
+
+def _configureStimulation(scommand, channel, source, digital_out, amplitude, duration, numberOfstimpulses, pulseTrain, stimenabled = True):
+
+    """
+    生成配置通道刺激设置的命令字符串。
+    此接口不对外部开放。
+
+    :param scommand: 已连接到TCP服务器的套接字对象。此函数生成命令字符串，但不发送它；
+                        调用者负责使用此套接字发送命令。
+    :param channel: 要配置的通道名称，例如 'A-010'。
+    :param source: 刺激的来源，例如 'keypressf1'。
+    :param digital_out: 数字信号输出 0 or 1。
+    :param amplitude: 刺激电流幅度列表，分别代表第一个脉冲幅度与第二个脉冲幅度，单位为微安。 注意非负。
+    :param duration: 时间列表，分别代表第一个刺激脉宽时间，第二个刺激脉宽时间，刺激前放大器稳定时间和刺激后放大器稳定时间，单位为微秒。
+    :param pulseTrain: “SinglePulse” - 默认 or “PulseTrain”。
+    :param numberOfstimpulses: 刺激脉冲数 0-256，仅在 pulseTrain 为 “PulseTrain” 时有效。
+    :param stimenabled: 一个布尔值，指示是否启用通道的刺激（True）或禁用（False）。
+
+    :return: 包含配置刺激通道所需的所有命令的字符串。命令用分号连接，并准备通过TCP发送。
+
+    注意：此函数仅生成配置字符串。发送此字符串通过`scommand`套接字是调用者的责任。
+            确保通过执行返回的命令上传刺激参数以使其生效。返回字符串中命令的顺序对于正确配置非常重要。
+            参数可以增加，因为还有其他刺激参数可以调整，对应增加接口中指令设置即可。
+            最后指令返回，主调函数负责发送指令，注意设置顺序。
+    """
+
+    # 必须有的，设置通道刺激为可触发态
+    com_stimenabled = f'set {channel}.stimenabled {stimenabled};'
+    com_digitalStimEnabled = f'set {digital_out}.stimenabled {stimenabled};'
+    # 其他指令该处插入即可
+    com_source = f'set {channel}.source {source};'
+    com_digitalSource = f'set {digital_out}.source {source};'
+
+    # 刺激电流幅值
+    com_firstphaseamplitudemicroamps = f'set {channel}.firstphaseamplitudemicroamps {amplitude[0]};'
+    com_secondphaseamplitudemicroamps = f'set {channel}.secondphaseamplitudemicroamps {amplitude[1]};'
+
+    # 刺激脉宽
+    com_firstphasedurationmicroseconds = f'set {channel}.firstphasedurationmicroseconds {duration[0]};'
+    com_secondphasedurationmicroseconds = f'set {channel}.secondphasedurationmicroseconds {duration[1]};'
+    com_digitalDurationmicroseconds = f'set {digital_out}.FirstPhaseDurationMicroseconds {duration[1] * 2};'
+
+    # 刺激后放大器稳定时间
+    com_prestimampsettlemicroseconds = f'set {channel}.PreStimAmpSettleMicroseconds 0;'
+    com_poststimampsettlemicroseconds = f'set {channel}.poststimampsettlemicroseconds 1000;'
+
+    # 单点与高频刺激类别
+    com_pulseortrain = f'set {channel}.PulseOrTrain {pulseTrain};'
+    com_digitalPulseortrain = f'set {digital_out}.PulseOrTrain {pulseTrain};'
+    
+    # 检查是否为高频刺激
+    if pulseTrain == "PulseTrain":
+
+        com_numberOfstimpulses = f'set {channel}.NumberOfStimPulses {numberOfstimpulses};'
+        com_digitalNumberOfstimpulses = f'set {digital_out}.NumberOfStimPulses {numberOfstimpulses};'
+        com_MaintainAmpSettle  = f'set {channel}.MaintainAmpSettle True;'
+        com_TrainPeriod = f'set {channel}.PulseTrainPeriodMicroseconds {duration[2]};'
+        com_digitalTrainPeriod = f'set {digital_out}.PulseTrainPeriodMicroseconds {duration[2]};'
+        com_uploadstimparameters = f'execute uploadstimparameters {channel};'
+        com_digitalUploadstimparameters = f'execute uploadstimparameters {digital_out};'
+        
+        com_config = (
+                    com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_secondphaseamplitudemicroamps + com_firstphasedurationmicroseconds + com_secondphasedurationmicroseconds
+                    + com_digitalStimEnabled + com_digitalSource + com_digitalDurationmicroseconds + com_digitalPulseortrain + com_digitalNumberOfstimpulses + com_digitalTrainPeriod
+                    + com_prestimampsettlemicroseconds + com_poststimampsettlemicroseconds + com_MaintainAmpSettle + com_TrainPeriod
+                    + com_pulseortrain + com_numberOfstimpulses +com_uploadstimparameters + com_digitalUploadstimparameters)
+    else:
+
+        # 单点刺激直接上传
+        com_uploadstimparameters = f'execute uploadstimparameters {channel};'
+        com_digitalUploadstimparameters = f'execute uploadstimparameters {digital_out};'
+        com_config = (
+                com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_secondphaseamplitudemicroamps + com_firstphasedurationmicroseconds + com_secondphasedurationmicroseconds
+                + com_digitalStimEnabled + com_digitalSource + com_digitalDurationmicroseconds + com_digitalPulseortrain
+                + com_prestimampsettlemicroseconds + com_poststimampsettlemicroseconds
+                + com_pulseortrain + com_uploadstimparameters + com_digitalUploadstimparameters)
+
+    return com_config
+
+def cancel_config(scommand, channels):
+    """
+    根据输入的通道、取消参数设置，以便下一次设置启动。
+    """
+
+    com_configs = []
+
+    for channel in channels:
+        com_poststimampsettlemicroseconds = f'set {channel}.poststimampsettlemicroseconds 1000;'
+        com_RefractoryPeriodMicroseconds = f'set {channel}.RefractoryPeriodMicroseconds 1000;'
+        com_uploadstimparameters = f'execute uploadstimparameters {channel};'
+        com_config = f'set {channel}.stimenabled False;' + com_poststimampsettlemicroseconds + com_RefractoryPeriodMicroseconds + com_uploadstimparameters
+        com_configs.append(com_config)
+
+    com_config = ';'.join(com_configs)
+    scommand.sendall(com_config.encode())
+    time.sleep(0.1)
+
+
+def configure_stimulation(scommand, channels, digital_out, amplitude, duration, trigger, numberOfstimpulses):
+    """
+    根据输入的通道、幅值和duration，生成对应的刺激信号，并发送给ITNAN,待触发；
+
+    为多个通道生成配置刺激设置的命令字符串。
+
+    :param scommand: 已连接到TCP服务器的套接字对象。此函数生成命令字符串，但不发送它；
+                    调用者负责使用此套接字发送命令。
+    :param channels: 一个包含要配置的通道名称的列表，例如 ['A-010', 'A-011']。
+    :param digital_out: 标明数字输出通道用于标识刺激时刻, ''。
+    :param amplitude: 刺激电流幅度列表，分别代表第一个脉冲幅度与第二个脉冲幅度，单位为微安。 注意非负。
+    :param duration: 时间列表，分别代表第一个刺激脉宽时间，第二个刺激脉宽时间，刺激前放大器稳定时间和刺激后放大器稳定时间，单位为微秒。
+    :param trigger: 字符串，表示触发器 'keypressf1 - keypressf8'。
+    :param numberOfstimpulses:  脉冲串个数
+
+    :return: 包含配置多个通道刺激设置所需的所有命令的字符串。命令用分号连接，并准备通过TCP发送。
+
+    注意：此函数仅生成配置字符串。发送此字符串通过`scommand`套接字是调用者的责任。
+        确保通过执行返回的命令上传刺激参数以使其生效。返回字符串中命令的顺序对于正确配置非常重要。
+    """
+
+    com_configs = []
+
+    if numberOfstimpulses >= 2:
+        for channel in channels:
+            com_config = _configureStimulation(scommand, channel, trigger, digital_out, amplitude, duration, numberOfstimpulses, "PulseTrain", stimenabled=True)
+            com_configs.append(com_config) 
+    else:
+        for channel in channels:
+            com_config = _configureStimulation(scommand, channel, trigger, digital_out, amplitude, duration, numberOfstimpulses, "SinglePulse", stimenabled=True)
+            com_configs.append(com_config)
+
+    com_config = ';'.join(com_configs)
+    scommand.sendall(com_config.encode())
+    time.sleep(0.1)
+
+    # return ';'.join(com_configs)
+
+
+
+def _configureStimulationForJianxin(scommand, channel, source, amplitude, stimenabled, pulseTrain="PulseTrain", numberOfstimpulses=10, PulseTrainPeriodMicroseconds = 100000):
 
     """
     生成配置通道刺激设置的命令字符串。
@@ -146,37 +322,31 @@ def _configureStimulation(scommand, channel, source, amplitude, duration, stimen
     com_firstphaseamplitudemicroamps = f'set {channel}.firstphaseamplitudemicroamps {amplitude[0]};'
     com_secondphaseamplitudemicroamps = f'set {channel}.secondphaseamplitudemicroamps {amplitude[1]};'
 
-    # 刺激脉宽
-    com_firstphasedurationmicroseconds = f'set {channel}.firstphasedurationmicroseconds {duration[0]};'
-    com_secondphasedurationmicroseconds = f'set {channel}.secondphasedurationmicroseconds {duration[1]};'
-
-    # 刺激后放大器稳定时间
-    com_prestimampsettlemicroseconds = f'set {channel}.PreStimAmpSettleMicroseconds {duration[2]};'
-    com_poststimampsettlemicroseconds = f'set {channel}.poststimampsettlemicroseconds {duration[3]};'
-
     # 单点与高频刺激类别
     com_pulseortrain = f'set {channel}.PulseOrTrain {pulseTrain};'
+    
+    
 
     # 检查是否为高频刺激
     if pulseTrain == "PulseTrain":
 
         com_numberOfstimpulses = f'set {channel}.NumberOfStimPulses {numberOfstimpulses};'
+        com_PulseTrainPeriodMicroseconds = f'set {channel}.PulseTrainPeriodMicroseconds {PulseTrainPeriodMicroseconds};'
         com_uploadstimparameters = f'execute uploadstimparameters {channel};'
-        com_config = (com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_secondphaseamplitudemicroamps + com_firstphasedurationmicroseconds + com_secondphasedurationmicroseconds
-                      + com_prestimampsettlemicroseconds + com_poststimampsettlemicroseconds
-                      + com_pulseortrain + com_numberOfstimpulses + com_uploadstimparameters)
+        com_config = (com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_secondphaseamplitudemicroamps
+                      + com_pulseortrain + com_numberOfstimpulses + com_uploadstimparameters + com_PulseTrainPeriodMicroseconds)
     else:
 
     # 单点刺激直接上传
         com_uploadstimparameters = f'execute uploadstimparameters {channel};'
         com_config = (
-                com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_secondphaseamplitudemicroamps + com_firstphasedurationmicroseconds + com_secondphasedurationmicroseconds
-                + com_prestimampsettlemicroseconds + com_poststimampsettlemicroseconds
+                com_stimenabled + com_source + com_firstphaseamplitudemicroamps + com_secondphaseamplitudemicroamps
                 + com_pulseortrain + com_uploadstimparameters)
 
     return com_config
 
-def configureStimulation(scommand, channels, amplitude, duration, trigger):
+
+def configureStimulationForSelec(scommand, channels, amplitude, stimenabled, pulseTrain, numberOfstimpulses, trigger):
     """
     为多个通道生成配置刺激设置的命令字符串。
 
@@ -196,7 +366,33 @@ def configureStimulation(scommand, channels, amplitude, duration, trigger):
     com_configs = []
 
     for channel in channels:
-        com_config = _configureStimulation(scommand, channel, trigger, amplitude, duration, stimenabled=True, pulseTrain="SinglePulse", numberOfstimpulses=2)
+        com_config = _configureStimulation(scommand, channel, trigger, amplitude, stimenabled, pulseTrain, numberOfstimpulses)
+        com_configs.append(com_config)
+
+    return ';'.join(com_configs)
+
+
+def configureStimulationForJianxin(scommand, channels, source, amplitude, stimenabled, pulseTrain, numberOfstimpulses, PulseTrainPeriodMicroseconds = 100000):
+    """
+    为多个通道生成配置刺激设置的命令字符串。
+
+    :param scommand: 已连接到TCP服务器的套接字对象。此函数生成命令字符串，但不发送它；
+                     调用者负责使用此套接字发送命令。
+    :param channels: 一个包含要配置的通道名称的列表，例如 ['A-010', 'A-011']。
+    :param amplitude: 刺激电流幅度列表，分别代表第一个脉冲幅度与第二个脉冲幅度，单位为微安。 注意非负。
+    :param duration: 时间列表，分别代表第一个刺激脉宽时间，第二个刺激脉宽时间，刺激前放大器稳定时间和刺激后放大器稳定时间，单位为微秒。
+    :param trigger: 字符串，表示触发器 'keypressf1 - keypressf8'。
+
+    :return: 包含配置多个通道刺激设置所需的所有命令的字符串。命令用分号连接，并准备通过TCP发送。
+
+    注意：此函数仅生成配置字符串。发送此字符串通过`scommand`套接字是调用者的责任。
+         确保通过执行返回的命令上传刺激参数以使其生效。返回字符串中命令的顺序对于正确配置非常重要。
+    """
+
+    com_configs = []
+
+    for channel in channels:
+        com_config = _configureStimulationForJianxin(scommand, channel, source, amplitude, stimenabled, pulseTrain, numberOfstimpulses, PulseTrainPeriodMicroseconds)
         com_configs.append(com_config)
 
     return ';'.join(com_configs)
@@ -271,7 +467,7 @@ def setSaveFileFormat(scommand, savleTypeIndex, latencyIndex, NewDirectory, Save
 
 def startRecord(scommand):
 
-    scommand.sendall(b'set runmode record')
+    scommand.sendall(b'set runmode run')
     time.sleep(0.1)  # Give some time for the command to be processed
 
 def stopRecord(scommand):
@@ -425,7 +621,6 @@ def TestDemo2(scommand):
     setSaveFileFormat(scommand,2,4,True,True,5)
 
     startRecord(scommand)
-    time.sleep(2)
     stopRecord(scommand)
 
 def TestDemo4(scommand):
@@ -435,18 +630,72 @@ def TestDemo4(scommand):
     command = configureStimulation(scommand,channels, [2550,2550], [5000,5000,200,500000], "KeyPressF1")
     scommand.sendall(command.encode())
 
-    # command += configureStimulation(scommand, channels2, [2550,2550], [5000, 5000,200,500000], "KeyPressF2")
-    # scommand.sendall(command.encode())
+    command += configureStimulation(scommand, channels2, [2550,2550], [5000, 5000,200,500000], "KeyPressF2")
+    scommand.sendall(command.encode())
 
-    # scommand.sendall(b'set runmode run;')
+    scommand.sendall(b'set runmode run;')
 
     time.sleep(1)
 
-    # TriggerStimulation(scommand, 'f1')
-    #
-    # time.sleep(3)
-    #
-    # TriggerStimulation(scommand, 'f2')
+    TriggerStimulation(scommand, 'f1')
+
+    time.sleep(3)
+
+    TriggerStimulation(scommand, 'f2')
+
+
+def ExperimentForSelect(scommand):
+
+    baseFileName = f"FileName"
+    path = f"E:/TCP/Data"
+
+    setFilePath(scommand, baseFileName, path)
+    setSaveFileFormat(scommand,2,4,True,True,5)
+
+    channels1 = ['C-008','C-009','C-010','C-011', 'C-012','C-013','C-014','C-015']
+    channels2 = ['C-016','C-017','C-018','C-019', 'C-020','C-021','C-022','C-023']
+    channels3 = ['D-000','D-001','D-002','D-003','D-004','D-005','D-006','D-007'] 
+    channels4 = ['D-024','D-025','D-026','D-027','D-028','D-029','D-030','D-031']
+
+    for i in range(4):
+        channels = "channels" + str(i+1)
+
+        for channel in channels:
+            i = 1
+            keypress = 'keypressf' + str(i)
+            command = configureStimulationForSelec(scommand, channel, [100,100], [True], "PulseTrain", 10, keypress)
+            scommand.sendall(command.encode())
+            i = i + 1
+        
+        time.sleep(5)
+        startRecord(scommand)
+
+        for i in range(8):
+            keypress = 'keypressf' + str(i+1)         
+            TriggerStimulation(scommand, keypress)
+            time.sleep(10)
+
+        for channel in channels:
+            i = 1
+            keypress = 'keypressf' + str(i)
+            command = __configureSingleStimulation(scommand, channel, keypress, 10, 500, False)
+            scommand.sendall(command.encode())
+            i = i + 1
+
+        stopRecord(scommand)
+
+
+
+
+    scommand.sendall(b'set runmode run;')
+
+    time.sleep(1)
+
+    TriggerStimulation(scommand, 'f1')
+
+    time.sleep(3)
+
+    TriggerStimulation(scommand, 'f2')
 
 
 
@@ -500,16 +749,88 @@ def TestDemo6(scommand):
 def TestDemo3(scommand):
     print(get_SampleRateHertz(scommand, 1024))
 
+def configureFirstGroupStimulation(scommand):
+    """
+    配置第一组通道(A-001到A-008)的刺激参数，并执行启用和禁用两个阶段。
+    
+    :param scommand: TCP服务器的套接字对象
+    """
+    # 第一组通道
+    channels1 = [f'A-{str(i).zfill(3)}' for i in range(0, 7)] 
+    channels2 = [f'A-{str(i).zfill(3)}' for i in range(8, 16)] 
+    channels3 = [f'A-{str(i).zfill(3)}' for i in range(16, 24)] 
+    channels4 = [f'A-{str(i).zfill(3)}' for i in range(24, 32)]
+    
+    # 基础参数设置
+    amplitude = [50, 50]  # 示例幅度值，需要根据实际需求调整
+    
+    # 第一阶段：启用刺激
+    for i, channel in enumerate(channels2):
+        trigger = f'keypressf{i+1}'
+        command = configureStimulationForJianxin(
+            scommand=scommand,
+            channels=[channel],  # 每次配置一个通道
+            source = 'keypressf' + str(i+1),
+            amplitude=amplitude,
+            stimenabled=True,
+            pulseTrain="PulseTrain",
+            numberOfstimpulses=10,
+            PulseTrainPeriodMicroseconds=1000000
+        )
+        scommand.sendall(command.encode())
+        time.sleep(0.1)  # 短暂延时确保命令被处理
+    
+    # 等待一段时间后执行第二阶段
+    time.sleep(1)
+    
+    # # 第二阶段：禁用刺激
+    # for i, channel in enumerate(channels):
+    #     trigger = f'keypressf{i+1}'
+    #     command = configureStimulationForJianxin(
+    #         scommand=scommand,
+    #         channels=[channel],
+    #         source = 'keypressf' + str(i+1),
+    #         amplitude=amplitude,
+    #         stimenabled=False,
+    #         pulseTrain="PulseTrain",
+    #         numberOfstimpulses=10,
+    #         PulseTrainPeriodMicroseconds=100000
+    #     )
+    #     scommand.sendall(command.encode())
+    #     time.sleep(0.1)
 
 def RunAndStimulateDemo():
 
     # Connect to TCP command server - default home IP address at port 5000
-    scommand = connect_to_server()
+    scommand = connect_to_server(ip_address="127.0.0.1", port=5000)
+    scommand2 = connect_to_server(ip_address="127.0.0.1", port=5001)
+    
+    # scommand2 = connect_to_server(ip_address="127.0.0.1", port=5001)
     # Query controller type from RHX software.
     # Throw an error and exit if controller type is not Stim.
-    verify_controller_type(scommand, COMMAND_BUFFER_SIZE)
+    # verify_controller_type(scommand, COMMAND_BUFFER_SIZE)
+    # verify_controller_type(scommand2, COMMAND_BUFFER_SIZE)
     # Query runmode from RHX software
-    ensure_controller_stopped(scommand, COMMAND_BUFFER_SIZE)
+    # ensure_controller_stopped(scommand, COMMAND_BUFFER_SIZE)
+    # ensure_controller_stopped(scommand2, COMMAND_BUFFER_SIZE)
+    
+    time.sleep(2)
+    
+    eles_key = ['A-001']
+    digitalOut2 = ["DIGITAL-OUT-01", "DIGITAL-OUT-02"]
+    source8 = ["keypressf1", "keypressf2", 
+                    "keypressf3", "keypressf4",
+                    "keypressf5", "keypressf6",
+                    "keypressf7", "keypressf8"]
+    amplitude = [100,100]
+    duration = [200,200,100000]
+    left_pulse_count = 3
+    configure_stimulation(scommand,eles_key, digitalOut2[0], amplitude, duration, source8[0], int(left_pulse_count))
+    # startRecord(scommand)
+    
+    # for i in range(10):
+    #     cancel_config(scommand,["A-000"])
+    #     use_config(scommand,["A-000"])
     # -----------------------------------------------------------------------------------------
     # Test1
     # TestDemo1(scommand)
@@ -518,12 +839,15 @@ def RunAndStimulateDemo():
     # Test3
     # TestDemo3(scommand)
     # Test4
-    TestDemo4(scommand)
+    # ExperimentForSelect(scommand)
+    # Test5
+    # configureFirstGroupStimulation(scommand)
+    # time.sleep(10)
     # Test6
     # TestDemo6(scommand)
     # -----------------------------------------------------------------------------------------
     # Close TCP socket
-    disconnect_from_server(scommand)
+    # disconnect_from_server(scommand)
 
 if __name__ == '__main__':
     # Declare buffer size for reading from TCP command socket
